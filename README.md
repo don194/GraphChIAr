@@ -23,7 +23,7 @@ GraphChIAr/
 │   ├── Model/                  # Model architectures
 │   ├── Predict/                # Scripts for making predictions
 │   └── Train/                  # Scripts for model training
-├── pipline.sh                  # Main pipeline script (training and prediction)
+├── train_and_evaluate.sh       # Scripts for model training and evaluation
 ├── predict_pip.sh              # Prediction-only pipeline script
 ├── ProcessedData/              # Directory for processed data
 └── ReferenceGenome/            # Reference genome files
@@ -83,7 +83,7 @@ pip install pyBigWig
 To train a model and make predictions on test cell types:
 
 ```bash
-./pipline.sh --train-celltype GM12878 --test-celltypes "K562 IMR90" \
+./train_and_evaluate.sh --train-celltype GM12878 --test-celltypes "K562 IMR90" \
   --target-type "CTCF_ChIA-PET" --chipseq "ctcf H3K4me3 H3K27ac" \
   --resolution 10000 --window_size 2000000 --step_size 500000 \
   --model ChIAPETMatrixPredictor --normalize NONE --log1p true \
@@ -96,12 +96,21 @@ To train a model and make predictions on test cell types:
 To make predictions using a pre-trained model checkpoint:
 
 ```bash
-./predict_pip.sh --model-path /path/to/model.ckpt \
-  --train-celltype GM12878 --test-celltypes "K562 IMR90" \
-  --target-type "CTCF_ChIA-PET" --chipseq "ctcf H3K4me3 H3K27ac" \
-  --resolution 10000 --window_size 2000000 --step_size 500000 \
-  --normalize NONE --log1p true --batch_size 32 --worker_num 4 \
-  --hic-format hic --target-format hic
+python predict.py \
+  --checkpoint-path /path/to/checkpoint.ckpt \
+  --output-dir /path/to/output/directory \
+  --model ChIAPETMatrixPredictor_efeaturesq_high \
+  --data-root /path/to/ProcessedData \
+  --celltype GM12878 \
+  --hic-file /path/to/Hi-C \
+  --chipseq-files ctcf \
+  --chr-sizes-file /path/to/ReferenceGenome/hg38/hg38.chrom.sizes \
+  --hic_resolution 5000 \
+  --resolution 1000 \
+  --step_size 500000 \
+  --window_size 500000 \
+  --chrom chr1 --start 0 --end 10000000 \
+  --log1p true
 ```
 
 ## Parameters
@@ -164,7 +173,7 @@ Visualization tools in the Figure directory help interpret results and compare p
 ## Example Workflow
 
 1. **Prepare data** according to the required directory structure
-2. **Train a model** using the pipline.sh script
+2. **Train a model** using the train_and_evaluate.sh script
 3. **Make predictions** on new cell types using the trained model
 4. **Evaluate results** using the metrics in the Metrics/ directory
 5. **Visualize predictions** using tools in the Figure/ directory

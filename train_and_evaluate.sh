@@ -402,7 +402,7 @@ for TEST_CELL in "${TEST_CELLTYPES[@]}"; do
     
     # Modify the predict command with updated parameters
     echo "Predicting ${TEST_CELL}..."
-    python ${SRC_DIR}/Predict/predict.py \
+    python ${SRC_DIR}/Train/test.py \
         --data-root "${PROCESSED_DATA_DIR}" \
         --celltype "${TEST_CELL}" \
         --hic-file "${TEST_HIC_FILE}" \
