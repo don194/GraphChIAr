@@ -86,7 +86,7 @@ To train a model and make predictions on test cell types:
 ./train_and_evaluate.sh --train-celltype GM12878 --test-celltypes "K562 IMR90" \
   --target-type "CTCF_ChIA-PET" --chipseq "ctcf H3K4me3 H3K27ac" \
   --resolution 10000 --window_size 2000000 --step_size 500000 \
-  --model ChIAPETMatrixPredictor --normalize NONE --log1p true \
+  --model GraphChIAr --normalize NONE --log1p true \
   --batch_size 32 --patience 8 --max_epochs 40 --worker_num 4 \
   --hic-format hic --target-format hic
 ```
@@ -99,7 +99,7 @@ To make predictions using a pre-trained model checkpoint:
 python predict.py \
   --checkpoint-path /path/to/checkpoint.ckpt \
   --output-dir /path/to/output/directory \
-  --model ChIAPETMatrixPredictor_efeaturesq_high \
+  --model GraphChIAr_efeaturesq_high \
   --data-root /path/to/ProcessedData \
   --celltype GM12878 \
   --hic-file /path/to/Hi-C \
@@ -123,7 +123,7 @@ python predict.py \
 | `--window_size` | Window size for Hi-C matrix | 2000000 |
 | `--resolution` | Resolution for Hi-C matrix | 10000 |
 | `--hic_resolution` | Optional higher resolution for Hi-C matrix | None |
-| `--model` | Model architecture | ChIAPETMatrixPredictor |
+| `--model` | Model architecture | GraphChIAr |
 | `--normalize` | Normalization method for Hi-C matrix | NONE |
 | `--log1p` | Apply log1p transformation | true |
 | `--batch_size` | Batch size | 32 |
