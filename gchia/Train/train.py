@@ -72,7 +72,7 @@ def init_parser():
     parser.add_argument('--chipseq-files', dest='chipseq_files', default=[], type=str, nargs='+',
                         help='List of ChIP-seq feature names or file paths')
 
-    
+
     # Dataloader Parameters
     parser.add_argument('--batch_size', dest='dataloader_batch_size', default=64, type=int,
                         help='Batch size for training')
@@ -110,7 +110,7 @@ def init_training(args):
     
     pl_module = TrainModule(args)
     pl_trainer = pl.Trainer(accelerator="gpu",
-                            gpus=1,
+                            devices=1,
                             max_epochs=args.trainer_max_epochs,
                             callbacks=[early_stop_callback, checkpoint_callback, lr_monitor],
                             logger=all_loggers,
@@ -205,9 +205,21 @@ class TrainModule(pl.LightningModule):
         optimizer = torch.optim.Adam(self.parameters(), 
                                      lr = self.args.trainer_lr,
                                      weight_decay = 0)
+       
+        # import pl_bolts
+        # scheduler = pl_bolts.optimizers.lr_scheduler.LinearWarmupCosineAnnealingLR(optimizer, warmup_epochs=10, max_epochs=self.args.trainer_max_epochs)
 
-        import pl_bolts
-        scheduler = pl_bolts.optimizers.lr_scheduler.LinearWarmupCosineAnnealingLR(optimizer, warmup_epochs=10, max_epochs=self.args.trainer_max_epochs)
+        warmup_epochs = 10
+        max_epochs = self.args.trainer_max_epochs
+        
+        def lambda_lr(epoch):
+            if epoch < warmup_epochs:
+                return float(epoch) / float(max(1, warmup_epochs))
+            else:
+                return 0.5 * (1.0 + np.cos(np.pi * (epoch - warmup_epochs) / (max_epochs - warmup_epochs)))
+        
+        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda_lr)
+        
         scheduler_config = {
             'scheduler': scheduler,
             'interval': 'epoch',
@@ -234,8 +246,10 @@ class TrainModule(pl.LightningModule):
         
         # Use the processed data root
         celltype_root = f'{args.data_root}/{args.celltype}'
+        step = args.step_size
         if mode == 'test':
-            step = args.window_size // 4
+            if(args.window_size >= 500000):
+                step = args.window_size // 4
         else :
             step = args.step_size
         # Process multiple ChIP-seq files
