@@ -63,17 +63,24 @@ data/
 git clone https://github.com/yourusername/GraphChIAr.git
 cd GraphChIAr
 
-# Create and activate conda environment (recommended)
-conda create -n graphchiar python=3.8
-conda activate graphchiar
+# Create and activate conda environment with Python 3.9
+conda create -n GraphChIA python=3.9 -y
+conda activate GraphChIA
 
-# Install dependencies
-pip install torch
-pip install torch-geometric
-pip install pytorch-lightning
-pip install h5py cooler hic-straw
-pip install numpy pandas matplotlib scikit-learn
-pip install pyBigWig
+# Install PyTorch 2.4 with CUDA 12.4 support
+conda install pytorch==2.4.0 torchvision==0.19.0 torchaudio==2.4.0 pytorch-cuda=12.4 -c pytorch -c nvidia
+
+# Install PyTorch Geometric
+conda install pyg -c pyg
+
+# Install PyTorch Lightning
+pip install pytorch-lightning==1.9.0
+
+# Install Hi-C and genomic data processing packages
+pip install hic-straw cooler pyBigWig h5py
+
+# Install other dependencies
+pip install numpy==1.26.4 pandas matplotlib scikit-learn==1.3.0 scipy==1.13
 ```
 
 ## Usage
