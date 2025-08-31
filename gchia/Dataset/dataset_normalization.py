@@ -80,7 +80,7 @@ class HiCCTCFDataset(Dataset):
         self.n_processes = n_processes if n_processes is not None else max(1, cpu_count() // 2)
         self.seq_h5 = '/home/dh/work/gChIA/ReferenceGenome/hg38/hg38.h5'
         super().__init__(root)
-    
+        
     
     
     def filter_chr_sizes(self, chr_sizes):

@@ -182,8 +182,7 @@ Visualization tools in the Figure directory help interpret results and compare p
 1. **Prepare data** according to the required directory structure
 2. **Train a model** using the train_and_evaluate.sh script
 3. **Make predictions** on new cell types using the trained model
-4. **Evaluate results** using the metrics in the Metrics/ directory
-5. **Visualize predictions** using tools in the Figure/ directory
+4. **Visualize predictions** using tools in the Figure/ directory
 
 ## Citation
 

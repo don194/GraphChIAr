@@ -46,7 +46,7 @@ class GraphChIAr(nn.Module):
         )
         
         self.pos_encoder = PositionalEncoding(self.hidden_dim // 2)
-        self.scale_conv = nn.Conv2d(self.hidden_dim * 3, self.hidden_dim, 1)
+        self.fusion_conv = nn.Conv2d(self.hidden_dim * 3, self.hidden_dim, 1)
         self.res_blocks = self.get_res_blocks(3, self.hidden_dim)  # Increased input channels for additional features
         
         # Adjacency matrix feature extraction
@@ -115,7 +115,78 @@ class GraphChIAr(nn.Module):
         )
         
         return adj_matrices.unsqueeze(1)  # [batch_size, 1, seq_len, seq_len]
-    
+    def batch_difformer_forward_for_sequences(self, difformer_model, x, batch_size, seq_len, edge_index=None, edge_weights=None):
+        """
+        Batch-safe DIFFormer processing for sequence data
+        
+        Important Note:
+        Standard PyTorch Geometric batch processing concatenates all nodes from different samples 
+        into a single large graph, which may cause information leakage between different samples.
+        
+        To ensure prediction accuracy and independence between samples, this function processes 
+        each sample independently:
+        1. Reorganize batch data into independent samples
+        2. Filter edge indices to ensure each sample only uses internal connections
+        3. Convert global edge indices to local indices
+        4. Apply DIFFormer to each sample separately
+        5. Recombine processed results
+        
+        Args:
+            difformer_model: DIFFormer model instance
+            x: Node features [batch_size * seq_len, features]
+            batch_size: Number of samples in batch
+            seq_len: Sequence length
+            edge_index: Edge indices [2, num_edges]
+            edge_weights: Edge weights [num_edges]
+            
+        Returns:
+            Processed node features [batch_size * seq_len, output_features]
+        """
+        # Reorganize data to [batch_size, seq_len, features]
+        x_batched = x.view(batch_size, seq_len, -1)
+        
+        outputs = []
+        
+        # Process each sample independently to ensure no cross-sample information transfer
+        for i in range(batch_size):
+            current_seq = x_batched[i]  # [seq_len, features]
+            
+            # Process edges for current sequence (if any)
+            current_edge_index = None
+            current_edge_weights = None
+            
+            if edge_index is not None:
+                start_idx = i * seq_len
+                end_idx = (i + 1) * seq_len
+                
+                # Only keep edges within current sequence, filter out cross-sample connections
+                edge_mask = (edge_index[0] >= start_idx) & (edge_index[0] < end_idx) & \
+                           (edge_index[1] >= start_idx) & (edge_index[1] < end_idx)
+                
+                if edge_mask.sum() > 0:
+                    # Convert to local indices (0 to seq_len-1)
+                    current_edge_index = edge_index[:, edge_mask] - start_idx
+                    
+                    if edge_weights is not None:
+                        current_edge_weights = edge_weights[edge_mask]
+                else:
+                    # If no edges for this sample, create empty edge_index
+                    current_edge_index = torch.empty((2, 0), dtype=torch.long, device=x.device)
+                    current_edge_weights = torch.empty(0, dtype=torch.float, device=x.device) if edge_weights is not None else None
+            else:
+                # If no edges at all, create empty edge_index for this sample
+                current_edge_index = torch.empty((2, 0), dtype=torch.long, device=x.device)
+                current_edge_weights = torch.empty(0, dtype=torch.float, device=x.device) if edge_weights is not None else None
+            
+            # Process current sequence (completely independent, no cross-sample information transfer)
+            seq_output = difformer_model(current_seq, current_edge_index, current_edge_weights)
+            outputs.append(seq_output)
+        
+        # Recombine to original batch format
+        final_output = torch.cat(outputs, dim=0)  # [batch_size * seq_len, output_features]
+        
+        return final_output
+
     def forward(self, data):
         x, seq, edge_index, edge_attr, batch = data.features, data.seq, data.edge_index, data.edge_attr, data.batch
         
@@ -130,10 +201,18 @@ class GraphChIAr(nn.Module):
         x = x.reshape(-1, x.size(2))
         
         edge_weights = edge_attr.float() if edge_attr is not None else torch.ones(edge_index.size(1), device=edge_index.device)
-        x = self.difformer(x, edge_index, edge_weights)
-        
+        # x = self.difformer(x, edge_index, edge_weights)
+        # Use batch-safe DIFFormer processing to ensure sample independence
+        x = self.batch_difformer_forward_for_sequences(
+            self.difformer, x, len(torch.unique(batch)), self.matrix_size, edge_index, edge_weights
+        )
         graph_nums = len(torch.unique(batch))
         batch_size = x.size(0)
+        seq_len = batch_size // graph_nums
+    
+        x = self.batch_difformer_forward_for_sequences(
+            self.difformer, x, graph_nums, seq_len, edge_index, edge_weights
+        )
         x = x.view(graph_nums, batch_size // graph_nums, -1).transpose(1, 2)
         
         # Create pair features
@@ -148,7 +227,7 @@ class GraphChIAr(nn.Module):
         # Combine features
         
         combined_features = torch.cat([pair_features, adj_features], dim=1)
-        combined_features = self.scale_conv(combined_features)
+        combined_features = self.fusion_conv(combined_features)
         # Apply residual blocks
         combined_features = self.res_blocks(combined_features)
         
@@ -420,7 +499,7 @@ class GraphChIAr_super(nn.Module):
         )
         
         self.pos_encoder = PositionalEncoding(self.hidden_dim // 2)
-        self.scale_conv = nn.Conv2d(self.hidden_dim * 3, self.hidden_dim, 1)
+        self.fusion_conv = nn.Conv2d(self.hidden_dim * 3, self.hidden_dim, 1)
         # self.res_blocks = self.get_res_blocks(3, self.hidden_dim)  # Increased input channels for additional features
         
         # Adjacency matrix feature extraction
@@ -486,6 +565,77 @@ class GraphChIAr_super(nn.Module):
         )
         
         return adj_matrices.unsqueeze(1)  # [batch_size, 1, seq_len, seq_len]
+    def batch_difformer_forward_for_sequences(self, difformer_model, x, batch_size, seq_len, edge_index=None, edge_weights=None):
+        """
+        Batch-safe DIFFormer processing for sequence data
+        
+        Important Note:
+        Standard PyTorch Geometric batch processing concatenates all nodes from different samples 
+        into a single large graph, which may cause information leakage between different samples.
+        
+        To ensure prediction accuracy and independence between samples, this function processes 
+        each sample independently:
+        1. Reorganize batch data into independent samples
+        2. Filter edge indices to ensure each sample only uses internal connections
+        3. Convert global edge indices to local indices
+        4. Apply DIFFormer to each sample separately
+        5. Recombine processed results
+        
+        Args:
+            difformer_model: DIFFormer model instance
+            x: Node features [batch_size * seq_len, features]
+            batch_size: Number of samples in batch
+            seq_len: Sequence length
+            edge_index: Edge indices [2, num_edges]
+            edge_weights: Edge weights [num_edges]
+            
+        Returns:
+            Processed node features [batch_size * seq_len, output_features]
+        """
+        # Reorganize data to [batch_size, seq_len, features]
+        x_batched = x.view(batch_size, seq_len, -1)
+        
+        outputs = []
+        
+        # Process each sample independently to ensure no cross-sample information transfer
+        for i in range(batch_size):
+            current_seq = x_batched[i]  # [seq_len, features]
+            
+            # Process edges for current sequence (if any)
+            current_edge_index = None
+            current_edge_weights = None
+            
+            if edge_index is not None:
+                start_idx = i * seq_len
+                end_idx = (i + 1) * seq_len
+                
+                # Only keep edges within current sequence, filter out cross-sample connections
+                edge_mask = (edge_index[0] >= start_idx) & (edge_index[0] < end_idx) & \
+                           (edge_index[1] >= start_idx) & (edge_index[1] < end_idx)
+                
+                if edge_mask.sum() > 0:
+                    # Convert to local indices (0 to seq_len-1)
+                    current_edge_index = edge_index[:, edge_mask] - start_idx
+                    
+                    if edge_weights is not None:
+                        current_edge_weights = edge_weights[edge_mask]
+                else:
+                    # If no edges for this sample, create empty edge_index
+                    current_edge_index = torch.empty((2, 0), dtype=torch.long, device=x.device)
+                    current_edge_weights = torch.empty(0, dtype=torch.float, device=x.device) if edge_weights is not None else None
+            else:
+                # If no edges at all, create empty edge_index for this sample
+                current_edge_index = torch.empty((2, 0), dtype=torch.long, device=x.device)
+                current_edge_weights = torch.empty(0, dtype=torch.float, device=x.device) if edge_weights is not None else None
+            
+            # Process current sequence (completely independent, no cross-sample information transfer)
+            seq_output = difformer_model(current_seq, current_edge_index, current_edge_weights)
+            outputs.append(seq_output)
+        
+        # Recombine to original batch format
+        final_output = torch.cat(outputs, dim=0)  # [batch_size * seq_len, output_features]
+        
+        return final_output
     
     def forward(self, data):
         x, seq, edge_index, edge_attr, batch = data.features, data.seq, data.edge_index, data.edge_attr, data.batch
@@ -502,8 +652,10 @@ class GraphChIAr_super(nn.Module):
         
         edge_weights = edge_attr.float() if edge_attr is not None else torch.ones(edge_index.size(1), device=edge_index.device)
         # logging.info(f"X shape: {x.shape}")
-        x = self.difformer(x, edge_index, edge_weights)
-        
+        # x = self.difformer(x, edge_index, edge_weights)
+        x = self.batch_difformer_forward_for_sequences(
+            self.difformer, x, len(torch.unique(batch)), self.matrix_size, edge_index, edge_weights
+        )
         graph_nums = len(torch.unique(batch))
         batch_size = x.size(0)
         x = x.view(graph_nums, batch_size // graph_nums, -1).transpose(1, 2)
@@ -521,7 +673,7 @@ class GraphChIAr_super(nn.Module):
         # Combine features
         
         combined_features = torch.cat([pair_features, adj_features], dim=1)
-        combined_features = self.scale_conv(combined_features)
+        combined_features = self.fusion_conv(combined_features)
         # Apply residual blocks
         #combined_features = self.res_blocks(combined_features)
         
@@ -530,4 +682,3 @@ class GraphChIAr_super(nn.Module):
         # matrix_pred = matrix_pred + matrix_pred.transpose(1, 2)
         
         return matrix_pred
-    
