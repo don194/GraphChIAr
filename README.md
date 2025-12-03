@@ -1,6 +1,6 @@
 # GraphChIAr
 
-## Multi-resolution regression model for ChIA-PET prediction through integrated Hi-C, ChIP-seq, and sequence data
+## GraphChIAr: Genome-wide super-resolution reconstruction of protein-mediated remote chromatin interactions by augmenting Hi-C interaction maps with multiple ChIP-seq profiles  
 
 GraphChIAr is a deep learning framework that predicts ChIA-PET interactions by integrating Hi-C, ChIP-seq, and genomic sequence data. This model uses advanced neural network architectures to capture the complex spatial relationships in chromatin structure.
 
