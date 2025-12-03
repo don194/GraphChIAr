@@ -43,7 +43,8 @@ data/
   │         └── [cell_type]_[chipseq_feature].bw
   └── ReferenceGenome/
        └── hg38/
-            └── hg38.chrom.sizes
+            ├── hg38.chrom.sizes
+            └── hg38.h5
 ```
 
 ### Required Data Files
@@ -51,7 +52,7 @@ data/
 1. **Hi-C data**: 3D genome contact maps in .hic, .cool, or .mcool format.
 2. **ChIA-PET or Micro-C data**: Target interaction data in .hic, .cool, or .mcool format.
 3. **ChIP-seq data**: Protein binding profiles in .bw (BigWig) format for features like CTCF, H3K4me3, H3K27ac, etc.
-4. **Reference Genome**: Human genome chromosome sizes file (hg38.chrom.sizes).
+4. **Reference Genome**: Human genome chromosome sizes file (hg38.chrom.sizes). Genomic sequence data in HDF5 format (hg38.h5). This file contains the one-hot encoded DNA sequences required by the model.
 
 ## Installation
 
