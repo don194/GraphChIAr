@@ -1,3 +1,4 @@
+import concurrent
 import torch
 from torch_geometric.data import Dataset, Data
 import pandas as pd
@@ -14,15 +15,19 @@ from functools import partial
 import time
 import h5py
 from scipy.interpolate import interp2d
+from pathlib import Path  
 class HiCCTCFDataset(Dataset):
+
     def __init__(self, root, hic_file, chipseq_files, chia_pet_file, chr_sizes,
                  mode = 'train' ,
                  resolution = 10000,
                  step_size = 2000000 ,
                  window_size = 2000000,
+                 offset = 0,
                  hic_resolution = None,
                  target_type = 'CTCF_ChIA-PET',
-                 log1p = True, normalization='NONE',n_processes=None):
+                 interpolate = False,
+                 log1p = True, transform = None, pre_transform = None, normalization='NONE',n_processes=None):
         """
         Initializes the dataset normalization class.
 
@@ -36,7 +41,9 @@ class HiCCTCFDataset(Dataset):
             resolution (int, optional): Resolution of the data. Defaults to 10000.
             step_size (int, optional): Step size for the sliding window. Defaults to 2000000.
             window_size (int, optional): Size of the window. Defaults to 2000000.
-            ctcf_bin_size (int, optional): Bin size for CTCF data. Defaults to 100.
+            offset (int, optional): Offset for the sliding window. Defaults to 0.
+            transform (callable, optional): A function/transform that takes in a sample and returns a transformed version. Defaults to None.
+            pre_transform (callable, optional): A function/transform that takes in a sample before any other processing. Defaults to None.
             normalization (str, optional): Type of normalization to apply. Defaults to 'NONE'.
 
         Attributes:
@@ -46,8 +53,8 @@ class HiCCTCFDataset(Dataset):
             resolution (int): Resolution of the data.
             step_size (int): Step size for the sliding window.
             window_size (int): Size of the window.
+            offset (int): Offset for the sliding window.
             normalization (str): Type of normalization to apply.
-            ctcf_bin_size (int): Bin size for CTCF data.
             mode (str): Mode of operation, either 'train' or 'test'.
             chr_sizes (DataFrame): Filtered chromosome sizes.
             processed_files (list): List of processed files.
@@ -59,6 +66,7 @@ class HiCCTCFDataset(Dataset):
         self.hic_resolution = hic_resolution if hic_resolution is not None else resolution
         self.step_size = step_size
         self.window_size = window_size
+        self.offset = offset
         self.normalization = normalization
         self.target_type = target_type
         self.log1p = log1p
@@ -66,7 +74,7 @@ class HiCCTCFDataset(Dataset):
         self.mode = mode
         self.chr_sizes = self.filter_chr_sizes(chr_sizes)
         self.processed_files = []
-        
+        self.interpolate = interpolate
         # Detect file types
         self.hic_file_type = os.path.splitext(hic_file)[1].lower().replace('.', '')
         self.chia_file_type = os.path.splitext(chia_pet_file)[1].lower().replace('.', '')
@@ -77,10 +85,16 @@ class HiCCTCFDataset(Dataset):
         else:
             self.processed_dir_name = f'processed_{resolution}_{window_size}_{normalization}_log1p_{log1p}_hictype_{self.hic_file_type}_chiatype_{self.chia_file_type}'
         
+        # Update processed directory name with interpolate option
+        if self.interpolate:
+            self.processed_dir_name += '_interpolate_5x'
+        if offset > 0:
+            self.processed_dir_name += f'_offset_{offset}'
         self.n_processes = n_processes if n_processes is not None else max(1, cpu_count() // 2)
-        self.seq_h5 = '/home/dh/work/gChIA/ReferenceGenome/hg38/hg38.h5'
-        super().__init__(root)
-        
+        repo_root = Path(__file__).resolve().parents[3]  # …/GraphChIAr
+        self.seq_h5 = str(repo_root / 'ReferenceGenome' / 'hg38' / 'hg38.h5')
+        super().__init__(root, transform, pre_transform)
+    
     
     
     def filter_chr_sizes(self, chr_sizes):
@@ -113,10 +127,13 @@ class HiCCTCFDataset(Dataset):
         if not self.processed_files:
             for _, row in self.chr_sizes.iterrows():
                 chrom, size = row['chr'], row['size']
+                end_limit = size
+                if self.offset > 0:
+                    end_limit = size - self.offset
                 for start in range(0, size, self.step_size):
                     # Calculate the end position of the window
                     end = start + self.window_size
-                    if end > size:
+                    if end > end_limit:
                         continue
                     self.processed_files.append(f'data_{chrom}_{start}_{end}.pt')
         return self.processed_files
@@ -125,6 +142,58 @@ class HiCCTCFDataset(Dataset):
         dir = os.path.join(self.root, self.target_type)
         return os.path.join(dir, self.processed_dir_name)
     
+    def _read_inter_hic_matrix(self, hic_file, chrom, start1, end1, start2, end2, res):
+        """
+        Reads an inter-regional Hi-C interaction matrix.
+        Supports both .hic and .cool/.mcool files.
+        """
+        try:
+            file_ext = os.path.splitext(hic_file)[1].lower()
+            num_bins1 = (end1 - start1) // res
+            num_bins2 = (end2 - start2) // res
+
+            if file_ext in ['.cool', '.mcool']:
+                import cooler
+                if file_ext == '.mcool':
+                    clr = cooler.Cooler(f'{hic_file}::/resolutions/{res}')
+                else:
+                    clr = cooler.Cooler(hic_file)
+                
+                chr_name = chrom
+                if chr_name not in clr.chromnames:
+                    alt_chr_name = chr_name[3:] if chr_name.startswith('chr') else f'chr{chr_name}'
+                    if alt_chr_name in clr.chromnames:
+                        chr_name = alt_chr_name
+                    else:
+                        print(f"Warning: {chrom} not found in cooler file.")
+                        return np.zeros((num_bins1, num_bins2), dtype=np.float32)
+
+                region1 = (chr_name, start1, end1)
+                region2 = (chr_name, start2, end2)
+                matrix = clr.matrix(balance=self.normalization != 'NONE').fetch(region1, region2)
+                matrix = np.nan_to_num(matrix, nan=0.0)
+            else:
+                chrom_num = chrom.replace('chr', '')
+                loc1 = f'{chrom_num}:{start1}:{end1}'
+                loc2 = f'{chrom_num}:{start2}:{end2}'
+                result = hicstraw.straw('observed', self.normalization, hic_file, loc1, loc2, 'BP', res)
+                matrix = np.zeros((num_bins1, num_bins2), dtype=np.float32)
+                
+                for entry in result:
+                    bin_x = (entry.binX - start1) // res
+                    bin_y = (entry.binY - start2) // res
+                    if 0 <= bin_x < num_bins1 and 0 <= bin_y < num_bins2:
+                        matrix[bin_x, bin_y] = entry.counts
+            
+            if self.log1p:
+                matrix = np.log1p(matrix)
+                
+            return matrix
+
+        except Exception as e:
+            print(f'Error reading inter-Hi-C matrix for {chrom}:{start1}-{end1} vs {start2}-{end2}: {str(e)}')
+            return np.zeros((num_bins1, num_bins2), dtype=np.float32)
+
     
     def _read_hic_matrix(self, hic_file, chrom, start, end, res):
         """
@@ -308,33 +377,75 @@ class HiCCTCFDataset(Dataset):
                 return True
 
             # Read the Hi-C matrix and CTCF profile
-            print(f'Processing {chrom}:{start}-{end}...')
-            # print('reading hic matrix')
-            hic_matrix = self._read_hic_matrix(self.hic_file, chrom, start, end, self.hic_resolution)
-            fold = self.hic_resolution // self.resolution
-            
-            hic_matrix = self._interpolate_matrix(hic_matrix, fold)
-            target_matrix = self._read_hic_matrix(self.chia_pet_file, chrom, start, end, self.resolution)
-            target_matrix = torch.from_numpy(target_matrix).float()
-            target_matrix = target_matrix.unsqueeze(0)
-            num_nodes = self.window_size // self.resolution
-            # Initialize placeholder node features  
-            node_features = torch.zeros((num_nodes, 1), dtype=torch.float)
-            # print('converting to graph')
-            # if hic_matrix.nnz >= 0 and target_matrix.nnz >= 0:
-                # print('converting to graph...')
-            edge_index, edge_attr = self._convert_to_graph(hic_matrix)
-            data = Data(
-                x=node_features,
-                edge_index=edge_index,
-                edge_attr=edge_attr,
-                y=target_matrix,
-                chrom=chrom,
-                start=start,
-                end=end
-            )
+            print(f'Processing {chrom}:{start}-{end}...with offset {self.offset}')
+            if self.offset == 0:
+                hic_matrix = self._read_hic_matrix(self.hic_file, chrom, start, end, self.hic_resolution)
+                fold = self.hic_resolution // self.resolution
+                # print(f'hic matrix shape before: {hic_matrix.shape}')
+                hic_matrix = self._interpolate_matrix(hic_matrix, fold)
+                # print(f'hic matrix shape: {hic_matrix.shape}')
+                if self.interpolate:
+                    target_resolution = self.resolution * 5 # interpolate to 5x
+                else :
+                    target_resolution = self.resolution
+                
+                target_matrix = self._read_hic_matrix(self.chia_pet_file, chrom, start, end, target_resolution)
+                # print(f'target matrix shape: {target_matrix.shape}')
+                if self.interpolate:
+                    target_matrix = self._interpolate_matrix(target_matrix, 5)
+                    # print(f'target matrix shape after interpolation: {target_matrix.shape}')
+                target_matrix = torch.from_numpy(target_matrix).float()
+                target_matrix = target_matrix.unsqueeze(0)
+                num_nodes = self.window_size // self.resolution
+                # Initialize placeholder node features  
+                node_features = torch.zeros((num_nodes, 1), dtype=torch.float)
+                # print('converting to graph')
+                # if hic_matrix.nnz >= 0 and target_matrix.nnz >= 0:
+                    # print('converting to graph...')
+                edge_index, edge_attr = self._convert_to_graph(hic_matrix)
+                data = Data(
+                    x=node_features,
+                    edge_index=edge_index,
+                    edge_attr=edge_attr,
+                    y=target_matrix,
+                    chrom=chrom,
+                    start=start,
+                    end=end
+                )
+            else:
+                num_nodes_per_anchor = self.window_size // self.resolution
+                start_A, end_A = start, start + self.window_size
+                start_B, end_B = start + self.offset, start + self.offset + self.window_size
+                aa_matrix = self._read_hic_matrix(self.hic_file, chrom, start_A, end_A, self.hic_resolution)
+                bb_matrix = self._read_hic_matrix(self.hic_file, chrom, start_B, end_B, self.hic_resolution)
+                ab_matrix = self._read_inter_hic_matrix(self.hic_file, chrom, start_A, end_A, start_B, end_B, self.hic_resolution)
+                target_matrix = self._read_inter_hic_matrix(self.chia_pet_file, chrom, start_A, end_A, start_B, end_B, self.resolution)
+                fold = self.hic_resolution // self.resolution
+                aa_matrix = self._interpolate_matrix(aa_matrix, fold)
+                bb_matrix = self._interpolate_matrix(bb_matrix, fold)
+                ab_matrix = self._interpolate_matrix(ab_matrix, fold)
+                edge_index_aa, edge_attr_aa = self._convert_to_graph(aa_matrix)
+                edge_index_bb, edge_attr_bb = self._convert_to_graph(bb_matrix)
+                edge_index_bb += num_nodes_per_anchor
+                edge_index_ab = torch.from_numpy(
+                    np.concatenate([
+                        np.stack([np.nonzero(ab_matrix)[0], np.nonzero(ab_matrix)[1] + num_nodes_per_anchor]),
+                        np.stack([np.nonzero(ab_matrix)[1] + num_nodes_per_anchor, np.nonzero(ab_matrix)[0]])
+                    ], axis=1)
+                )
+                edge_attr_ab = torch.from_numpy(
+                    np.concatenate([ab_matrix[np.nonzero(ab_matrix)], ab_matrix[np.nonzero(ab_matrix)]])
+                ).float()
+                edge_index = torch.cat([edge_index_aa, edge_index_bb, edge_index_ab], dim=1)
+                edge_attr = torch.cat([edge_attr_aa, edge_attr_bb, edge_attr_ab], dim=0)
+                region_id = torch.cat([torch.zeros(num_nodes_per_anchor), torch.ones(num_nodes_per_anchor)]).long()
+                data = Data(edge_index=edge_index, edge_attr=edge_attr,
+                            y=torch.from_numpy(target_matrix).float().unsqueeze(0),
+                            ab_hic=torch.from_numpy(ab_matrix).float().unsqueeze(0),
+                            region_id=region_id,
+                            anchor_A_coords=(chrom, start_A, end_A),
+                            anchor_B_coords=(chrom, start_B, end_B))
 
-            
             torch.save(data, out_file)
             print(f'Saved {chrom}:{start}-{end}')
             return True
@@ -406,74 +517,52 @@ class HiCCTCFDataset(Dataset):
         return len(self.processed_file_names)
     
     def get(self, idx):
-        """
-        Get dataset item with fully parallel loading of base data, CTCF profile and sequence.
-        Extracts coordinates from filename to enable complete parallelization.
-        
-        Args:
-            idx (int): Index of the data point to retrieve
-            
-        Returns:
-            torch_geometric.data.Data: Processed data object with all components
-        """
-        import concurrent.futures
-        import time
-        import re
-        
-        start_total = time.time()
         filename = self.processed_file_names[idx]
         file_path = os.path.join(self.processed_dir, filename)
-        
-        # Extract coordinates from filename
-        match = re.match(r'data_(.+)_(\d+)_(\d+)\.pt', filename)
-        if match:
-            chrom, start, end = match.groups()
-            start, end = int(start), int(end)
-        else:
-            raise ValueError(f"Cannot parse coordinates from filename: {filename}")
-        
-        # Define loading functions
-        def load_data():
-            """Load base data from disk"""
-            return torch.load(file_path, weights_only=False)
-        
-        def load_chipseq(chipseq_file,chrom, start, end):
-            """Load CTCF profile for the specified region"""
-            result = self._read_chipseq_profile(chipseq_file, chrom, start, end)
-            result = torch.from_numpy(result).float().unsqueeze(0)
-            return result
-        
-        def load_seq(chrom, start, end):
-            """Load sequence data for the specified region"""
-            result = self._read_Sequence(chrom, start, end)
-            result = torch.from_numpy(result).float().unsqueeze(0).transpose(1, 2)
-            return result
-        
-        # Use ThreadPoolExecutor for parallel loading of all data components
-        with concurrent.futures.ThreadPoolExecutor(max_workers=len(self.file_list) + 2) as executor:
-            # Submit all tasks in parallel
-            data_future = executor.submit(load_data)
-            chip_futures = []
-            for chipseq_file in self.file_list:
-                chip_futures.append(executor.submit(load_chipseq, chipseq_file, chrom, start, end))
-            seq_future = executor.submit(load_seq, chrom, start, end)
-            
-            # Get results from futures
-            data = data_future.result()
-            features = []
-            for future in chip_futures:
-                features.append(future.result())
-            seq = seq_future.result()
+        data = torch.load(file_path)
 
-       
-        if features:
-            features = torch.cat(features, dim=0)
-            features = features.unsqueeze(0)  
-            data.features = features
-        else:
-            data.features = torch.zeros((0, (end-start)), dtype=torch.float)  # 如果没有特征，创建空特征张量
-        
-        data.seq = seq
-        
-        
-        return data 
+        if hasattr(data, 'region_id'): # Offset mode
+            (chrom_A, start_A, end_A) = data.anchor_A_coords
+            (chrom_B, start_B, end_B) = data.anchor_B_coords
+
+            def load_features(file, chrom, start, end):
+                return self._read_chipseq_profile(file, chrom, start, end)
+            def load_sequence(chrom, start, end):
+                return self._read_Sequence(chrom, start, end)
+
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                # Load features and sequence for anchor A
+                chip_futures_A = {executor.submit(load_features, f, chrom_A, start_A, end_A): f for f in self.file_list}
+                seq_future_A = executor.submit(load_sequence, chrom_A, start_A, end_A)
+                
+                # Load features and sequence for anchor B
+                chip_futures_B = {executor.submit(load_features, f, chrom_B, start_B, end_B): f for f in self.file_list}
+                seq_future_B = executor.submit(load_sequence, chrom_B, start_B, end_B)
+
+                features_A = [future.result() for future in chip_futures_A]
+                features_B = [future.result() for future in chip_futures_B]
+                seq_A = seq_future_A.result()
+                seq_B = seq_future_B.result()
+
+            features = np.concatenate([np.stack(features_A, axis=0), np.stack(features_B, axis=0)], axis=1)
+            seq = np.concatenate([seq_A, seq_B], axis=0)
+            
+        else: # Standard mode
+            chrom, start, end = data.chrom, data.start, data.end
+            
+            def load_features(file):
+                return self._read_chipseq_profile(file, chrom, start, end)
+            def load_sequence():
+                return self._read_Sequence(chrom, start, end)
+                
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                chip_futures = {executor.submit(load_features, f): f for f in self.file_list}
+                seq_future = executor.submit(load_sequence)
+                
+                features = np.stack([future.result() for future in chip_futures], axis=0)
+                seq = seq_future.result()
+
+        data.features = torch.from_numpy(features).float().unsqueeze(0)
+        data.seq = torch.from_numpy(seq).float().transpose(0, 1).unsqueeze(0)
+
+        return data

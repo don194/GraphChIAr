@@ -7,9 +7,10 @@ from torch_geometric.data import Data
 import numpy as np
 import logging
 class ConvBlock(nn.Module):
-    def __init__(self, size, stride = 2, hidden_in = 64, hidden = 64):
+    def __init__(self, size, stride = 2, hidden_in = 64, hidden = 64, Maxpool = True):
         super(ConvBlock, self).__init__()
         pad_len = int(size / 2)
+        self.Maxpool = Maxpool
         self.scale = nn.Sequential(
                         nn.Conv1d(hidden_in, hidden, size, stride, pad_len),
                         nn.BatchNorm1d(hidden),
@@ -22,7 +23,8 @@ class ConvBlock(nn.Module):
                         nn.Conv1d(hidden, hidden, size, padding = pad_len),
                         nn.BatchNorm1d(hidden),
                         )
-        self.pool = nn.MaxPool1d(5)
+        if self.Maxpool:
+            self.pool = nn.MaxPool1d(5)
         self.relu = nn.ReLU()
 
     def forward(self, x):
@@ -30,7 +32,8 @@ class ConvBlock(nn.Module):
         identity = scaled
         res_out = self.res(scaled)
         out = self.relu(res_out + identity)
-        out = self.pool(out)
+        if self.Maxpool:
+            out = self.pool(out)
         return out
     
 
@@ -91,7 +94,7 @@ class ResBlockDilated(nn.Module):
                             dilation = dil),
                         nn.BatchNorm2d(hidden),
                         nn.ReLU(),
-                         nn.Conv2d(hidden, hidden, size, padding = pad_len,
+                        nn.Conv2d(hidden, hidden, size, padding = pad_len,
                             dilation = dil),
                         nn.BatchNorm2d(hidden),
                         )

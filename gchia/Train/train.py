@@ -68,11 +68,21 @@ def init_parser():
     parser.add_argument('--normalize', dest='normalize', default='NONE', type=str,
                         help='Normalization method for Hi-C matrix')
     parser.add_argument('--log1p', type=str, default='True', help='log1p transform the Hi-C matrix (True/False)')
+    parser.add_argument('--offset', dest='offset', default=0, type=int,
+                        help='Genomic distance offset for inter-region prediction. Default is 0 (intra-region).')
+   
     # Add chipseq-files argument to parser
     parser.add_argument('--chipseq-files', dest='chipseq_files', default=[], type=str, nargs='+',
                         help='List of ChIP-seq feature names or file paths')
 
+    # Add interpolate argument to parser
+    parser.add_argument('--interpolate', dest='interpolate', default='False', type=str,
+                        help='Whether to interpolate Hi-C and ChIA-PET matrices to 5x resolution (True/False)')
 
+    # Add resume_from_checkpoint argument
+    parser.add_argument('--resume_from_checkpoint', dest='resume_from_checkpoint', default=None, type=str,
+                        help='Path to checkpoint file to resume training from')
+        
     # Dataloader Parameters
     parser.add_argument('--batch_size', dest='dataloader_batch_size', default=64, type=int,
                         help='Batch size for training')
@@ -120,15 +130,26 @@ def init_training(args):
     trainloader = pl_module.get_dataloader(args, 'train')
     valloader = pl_module.get_dataloader(args, 'val')
     testloader = pl_module.get_dataloader(args, 'test')
-    pl_trainer.fit(pl_module, trainloader, valloader)
+    
+    # Check if we should resume from checkpoint
+    if hasattr(args, 'resume_from_checkpoint') and args.resume_from_checkpoint:
+        if os.path.exists(args.resume_from_checkpoint):
+            print(f"Resuming training from checkpoint: {args.resume_from_checkpoint}")
+            pl_trainer.fit(pl_module, trainloader, valloader, ckpt_path=args.resume_from_checkpoint)
+        else:
+            print(f"Warning: Checkpoint file not found: {args.resume_from_checkpoint}")
+            print("Starting fresh training...")
+            pl_trainer.fit(pl_module, trainloader, valloader)
+    else:
+        pl_trainer.fit(pl_module, trainloader, valloader)
     
 class TrainModule(pl.LightningModule):
     
     def __init__(self, args):
         super().__init__()
-        self.args = args
+        self.save_hyperparameters(vars(args)) 
         self.model = self.get_model(args)
-        self.save_hyperparameters()
+        
 
     def forward(self,x):
         return self.model(x)
@@ -148,27 +169,37 @@ class TrainModule(pl.LightningModule):
         total_loss = 0
         loss_fn = torch.nn.MSELoss()
 
-        for graph_idx in torch.unique(batch_matrix):
-            # Get the predicted matrix for current graph
-            graph_pred = pred_matrix[graph_idx]
+        unique_graphs = torch.unique(batch_matrix)
+        num_graphs = len(unique_graphs)
+        
+        if self.hparams.offset > 0:
+            if batch.y.dim() == 4 and batch.y.size(1) == 1:
+                targets = batch.y.squeeze(1)
+            else:
+                targets = batch.y
             
-            # Get the ground truth sparse matrix for current graph and convert to dense
-            graph_y = batch.y[graph_idx]
-            n = graph_pred.size(0)  # matrix size
+            if pred_matrix.dim() != targets.dim():
+                 pred_matrix = pred_matrix.view(num_graphs, *targets.shape[1:])
+
+            loss = loss_fn(pred_matrix, targets)
+            return loss
+        else:
             
-            # Create upper triangular mask
-            triu_mask = torch.triu(torch.ones(n, n), diagonal=1).bool().to(graph_pred.device)
+            for i in range(pred_matrix.size(0)):
+                graph_pred = pred_matrix[i]
+                graph_y = batch.y[i].squeeze(0)
+                
+                n = graph_pred.size(0)
+                triu_mask = torch.triu(torch.ones(n, n), diagonal=1).bool().to(graph_pred.device)
+                
+                pred_triu = graph_pred[triu_mask]
+                y_triu = graph_y[triu_mask]
+                
+                loss = loss_fn(pred_triu, y_triu)
+                total_loss += loss
             
-            # Apply mask to both predicted and ground truth matrices
-            graph_pred_triu = graph_pred[triu_mask].to(graph_pred.device)
-            dense_y_triu = graph_y[triu_mask].to(graph_pred.device)
-            
-            # Calculate loss for upper triangular part only
-            loss = loss_fn(graph_pred_triu, dense_y_triu)
-            total_loss += loss
-            
-        num_graphs = len(torch.unique(batch_matrix))
-        return total_loss / num_graphs
+            return total_loss / pred_matrix.size(0)
+
     
     def training_step(self, batch, batch_idx):
         pred_matrix = self(batch)
@@ -202,15 +233,14 @@ class TrainModule(pl.LightningModule):
         self.log('avg_val_loss', avg_loss, prog_bar=True)
     
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam(self.parameters(), 
-                                     lr = self.args.trainer_lr,
-                                     weight_decay = 0)
+        optimizer = torch.optim.Adam(self.parameters(), lr=self.hparams.trainer_lr, weight_decay=0)
+        
        
         # import pl_bolts
         # scheduler = pl_bolts.optimizers.lr_scheduler.LinearWarmupCosineAnnealingLR(optimizer, warmup_epochs=10, max_epochs=self.args.trainer_max_epochs)
 
         warmup_epochs = 10
-        max_epochs = self.args.trainer_max_epochs
+        max_epochs = self.hparams.trainer_max_epochs
         
         def lambda_lr(epoch):
             if epoch < warmup_epochs:
@@ -243,6 +273,7 @@ class TrainModule(pl.LightningModule):
         """
         
         log1p_bool = args.log1p.lower() == 'true'
+        interpolate_bool = args.interpolate.lower() == 'true'
         
         # Use the processed data root
         celltype_root = f'{args.data_root}/{args.celltype}'
@@ -250,6 +281,8 @@ class TrainModule(pl.LightningModule):
         if mode == 'test':
             if(args.window_size >= 500000):
                 step = args.window_size // 4
+            else:
+                step = args.window_size
         else :
             step = args.step_size
         # Process multiple ChIP-seq files
@@ -307,8 +340,9 @@ class TrainModule(pl.LightningModule):
             'resolution': args.resolution,
             'normalization': args.normalize,
             'log1p': log1p_bool,
-            'target_type': args.target_type
-            
+            'target_type': args.target_type,
+            'offset':args.offset,
+            'interpolate': interpolate_bool  # Pass the interpolate parameter
         }
         
         # Add hic_resolution if specified
@@ -341,25 +375,35 @@ class TrainModule(pl.LightningModule):
     
     def get_model(self, args):
         model_name = args.model
-        ModelClass = getattr(Model, model_name)
+        logging.info(f"Attempting to load model: {model_name}")
         
-        # Calculate feature dimension based on number of ChIP-seq files
-        feature_dim = 0  # Default feature dimension
-        
-        # Count chipseq files if available
-        if hasattr(args, 'chipseq_files') and args.chipseq_files:
-            feature_dim += len(args.chipseq_files)
-            print(f"Feature dim: {feature_dim}")
-        # Add CTCF file for backward compatibility if it's not already counted in chipseq_files
-        elif hasattr(args, 'ctcf_file') and args.ctcf_file:
-            feature_dim += 1
-        
-        # Create model with appropriate feature dimension
-        model = ModelClass(
-            resolution=args.resolution, 
-            window_size=args.window_size,
-            feature_dim=feature_dim  # Pass the calculated feature dimension
-        )
+        try:
+            ModelClass = getattr(Model, model_name)
+        except AttributeError:
+            logging.error(f"Model '{model_name}' not found in Model.py. Please check the model name.")
+            sys.exit(1)
+            
+        feature_dim = len(args.chipseq_files) if hasattr(args, 'chipseq_files') and args.chipseq_files else 0
+        model_params = {
+            'resolution': args.resolution,
+            'window_size': args.window_size,
+            'feature_dim': feature_dim
+        }
+
+        if 'Offset' in model_name:
+            model_params['offset'] = args.offset
+
+        try:
+            import inspect
+            sig = inspect.signature(ModelClass.__init__)
+            valid_params = {k: v for k, v in model_params.items() if k in sig.parameters}
+            model = ModelClass(**valid_params)
+            logging.info(f"Successfully instantiated model '{model_name}' with params: {valid_params}")
+        except Exception as e:
+            logging.error(f"Failed to instantiate model '{model_name}' with parameters {model_params}. Error: {e}")
+            logging.error("Please ensure the model's __init__ method accepts these parameters or has appropriate defaults.")
+            sys.exit(1)
+
         return model
         
 if __name__ == '__main__':

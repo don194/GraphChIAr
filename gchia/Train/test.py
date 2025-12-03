@@ -12,7 +12,7 @@ import numpy as np
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-def separate_pred_matrix(pred_matrix, batch):
+def separate_pred_matrix(pred_matrix, batch, offset_val = 0):
     """
     Separate the predicted matrix by individual graphs
     
@@ -23,21 +23,30 @@ def separate_pred_matrix(pred_matrix, batch):
     Returns:
         list of tuple: Each element contains (prediction matrix, chrom, start, end) for a single graph
     """
-    batch_matrix = batch.batch
     separated_data = []
+    num_graphs = batch.num_graphs
 
-    for graph_idx in torch.unique(batch_matrix):
-        graph_mask = (batch_matrix == graph_idx)
-        # Extract matrix for current graph
-        graph_matrix = pred_matrix[graph_idx]
+    for i in range(num_graphs):
+        graph_matrix = pred_matrix[i]
         
-        # Extract chromosome, start, and end information for the current graph
-        idx = torch.where(graph_mask)[0][0]  # Get first index for this graph
-        chrom = batch.chrom[graph_idx]
-        start = batch.start[graph_idx]
-        end = batch.end[graph_idx]
+        if offset_val > 0:
+            coords_A = batch.anchor_A_coords[i]  
+            coords_B = batch.anchor_B_coords[i]  
+            coords = {
+                'chrom': coords_A[0],
+                'start_A': coords_A[1],  
+                'end_A': coords_A[2],
+                'start_B': coords_B[1],
+                'end_B': coords_B[2]
+            }
+        else:
+            coords = {
+                'chrom': batch.chrom[i],
+                'start': batch.start[i].item(),
+                'end': batch.end[i].item()
+            }
         
-        separated_data.append((graph_matrix, chrom, start, end))
+        separated_data.append((graph_matrix, coords))
     return separated_data
 
 def load_model_and_predict(checkpoint_path, args):
@@ -80,7 +89,8 @@ def load_model_and_predict(checkpoint_path, args):
     # 1. Load model
     model = TrainModule.load_from_checkpoint(
         checkpoint_path,
-        args=args
+        args=args,
+        strict=False
     )
     model.eval()
     
@@ -101,13 +111,12 @@ def load_model_and_predict(checkpoint_path, args):
             pred_matrix = model(batch)
             
             # Separate prediction matrices by graph and get location info
-            separated_data = separate_pred_matrix(pred_matrix, batch)
+            separated_data = separate_pred_matrix(pred_matrix, batch,args.offset)
             
             # Move matrices to CPU
-            separated_data = [(matrix.cpu(), chrom, start.cpu(), end.cpu()) 
-                            for matrix, chrom, start, end in separated_data]
+            separated_data_cpu = [(matrix.cpu(), coords) for matrix, coords in separated_data]
             
-            all_batch_predictions.append(separated_data)
+            all_batch_predictions.append(separated_data_cpu)
             
             if batch_idx % 10 == 0:  # Print progress every 10 batches
                 logger.info(f"Processed batch {batch_idx}/{len(test_loader)}")
@@ -116,7 +125,7 @@ def load_model_and_predict(checkpoint_path, args):
     return all_batch_predictions
 
 
-def save_predictions(all_batch_predictions, save_dir):
+def save_predictions(all_batch_predictions, save_dir, offset_val = 0):
     """
     Save prediction results with chromosome information in filenames
     
@@ -132,26 +141,27 @@ def save_predictions(all_batch_predictions, save_dir):
     saved_count = 0
     
     # Flatten predictions from all batches
-    for batch_idx, batch_predictions in enumerate(all_batch_predictions):
-        for matrix, chrom, start, end in batch_predictions:
-            # Convert tensor to numpy array
+    for batch_predictions in all_batch_predictions:
+        for matrix, coords in batch_predictions:
             matrix_np = matrix.numpy()
-            # Create filename with location information
-            filename = f'pred_matrix_{chrom}_{int(start)}_{int(end)}.npy'
+            
+            
+            if offset_val > 0:
+                filename = f"pred_matrix_{coords['chrom']}_{coords['start_A']}-{coords['end_A']}_vs_{coords['start_B']}-{coords['end_B']}.npy"
+            else:
+                filename = f'pred_matrix_{coords["chrom"]}_{int(coords["start"])}_{int(coords["end"])}.npy'
+
             save_path = os.path.join(save_dir, filename)
             np.save(save_path, matrix_np)
-            saved_count += 1
-            
-            # Log progress periodically
-            if saved_count % 50 == 0:
-                logger.info(f'Saved {saved_count}/{total_predictions} matrices')
     
-    logger.info(f"Successfully saved {saved_count} prediction matrices")
+    logger.info("Successfully saved prediction matrices")
 
 
 def main():
     parser = argparse.ArgumentParser(description='Predict ChIA-PET interactions using trained model')
     # Add required parameters matching those used during training
+    parser.add_argument('--offset', dest='offset', default=0, type=int,
+                        help='Offset value for prediction windows')
     parser.add_argument('--data-root', required=True, type=str,
                         help='Root directory for processed data')
     parser.add_argument('--celltype', required=True, type=str,
@@ -193,6 +203,8 @@ def main():
     parser.add_argument('--normalize', dest='normalize', default='NONE', type=str,
                         help='Normalization method for Hi-C matrix')
     parser.add_argument('--log1p', type=str, default='True', help='log1p transform the Hi-C matrix (True/False)')
+    parser.add_argument('--interpolate', dest='interpolate', default='False', type=str,
+                        help='Whether to interpolate Hi-C and ChIA-PET matrices to 5x resolution (True/False)')
 
                         
     args = parser.parse_args()
@@ -218,7 +230,7 @@ def main():
     all_batch_predictions = load_model_and_predict(args.checkpoint_path, args)
     
     # Save prediction results
-    save_predictions(all_batch_predictions, args.save_dir)
+    save_predictions(all_batch_predictions, args.save_dir, args.offset)
     
     logger.info("Prediction completed successfully")
     

@@ -237,7 +237,190 @@ class GraphChIAr(nn.Module):
         
         return matrix_pred
     
-    
+class GraphChIArOffset(nn.Module):
+    def __init__(
+        self,
+        resolution,
+        window_size,
+        offset,
+        filter_size=5,
+        n_difformer_layers=2,
+        num_heads=4,
+        dropout=0.1,
+        hidden_dim=32,
+        feature_dim=1 
+    ):
+        super().__init__()
+        self.window_size = window_size
+        self.matrix_size = window_size // resolution
+        self.resolution = resolution
+        self.offset = offset
+        self.hidden_dim = hidden_dim
+        self.feature_dim = feature_dim + 5
+        
+        self.conv_blocks = self.get_conv_blocks(filter_size,resolution, hidden_dim)
+        self.pos_encoder = PositionalEncoding(hidden_dim // 2)
+        
+        self.difformer = DIFFormer(
+            in_channels=hidden_dim,
+            hidden_channels=hidden_dim,
+            out_channels=hidden_dim,
+            num_layers=n_difformer_layers,
+            num_heads=num_heads,
+            dropout=dropout,
+            use_bn=True,
+            use_residual=True
+        )
+        
+        self.inter_hic_conv = nn.Sequential(
+            nn.Conv2d(1, hidden_dim // 2, 3, padding=1),
+            nn.BatchNorm2d(hidden_dim // 2),
+            nn.ReLU(),
+            nn.Conv2d(hidden_dim // 2, hidden_dim, 3, padding=1),
+            nn.BatchNorm2d(hidden_dim),
+            nn.ReLU()
+        )
+        self.fusion_conv = nn.Conv2d(hidden_dim * 3, hidden_dim, 1)
+        self.res_blocks = self._get_res_blocks(3, hidden_dim)
+        self.mlp = nn.Sequential(
+            nn.Conv2d(hidden_dim, hidden_dim // 2, 1),
+            nn.ReLU(),
+            nn.Conv2d(hidden_dim // 2, 1, 1),
+            nn.ReLU()
+        )
+
+    def get_conv_blocks(self, filter, resolution,hidden_dim):
+        if(self.feature_dim < 8):
+            hidden = [self.feature_dim, 8, 8]
+        else:
+            hidden = [self.feature_dim, 16, 16]
+        tmp = resolution
+        blocks = []
+        for i in range(3, math.floor(math.log10(resolution)) + 1):
+            hidden.append(hidden_dim // 2)
+        for i in range(len(hidden) - 1):
+            blocks.append(ConvBlock(filter, stride=2, hidden_in=hidden[i], hidden=hidden[i+1]))
+            tmp /= 10
+        if not math.log10(resolution).is_integer():
+            if tmp == 2:
+                blocks.append(ConvBlock(filter, stride=2, hidden_in=hidden[-1], hidden=hidden_dim // 2, Maxpool=False))
+            elif tmp == 5:
+                blocks.append(ConvBlock(filter, stride=1, hidden_in=hidden[-1], hidden=hidden_dim // 2))
+        return nn.Sequential(*blocks)
+
+    def _get_res_blocks(self, n, hidden):
+        blocks = []
+        blocks.append(ResBlockDilated(3, hidden=hidden, dil=1))
+        for i in range(n):
+            dilation = 2 ** (i + 1)
+            blocks.append(ResBlockDilated(3, hidden=hidden, dil=dilation))
+        return nn.Sequential(*blocks)
+
+    def batch_difformer_forward_for_sequences(self, difformer_model, x, batch_size, seq_len, edge_index=None, edge_weights=None):
+        # Reorganize data to [batch_size, seq_len, features]
+        x_batched = x.view(batch_size, seq_len, -1)
+        
+        outputs = []
+        
+        # Process each sample independently to ensure no cross-sample information transfer
+        for i in range(batch_size):
+            current_seq = x_batched[i]  # [seq_len, features]
+            
+            # Process edges for current sequence (if any)
+            current_edge_index = None
+            current_edge_weights = None
+            
+            if edge_index is not None:
+                start_idx = i * seq_len
+                end_idx = (i + 1) * seq_len
+                
+                # Only keep edges within current sequence, filter out cross-sample connections
+                edge_mask = (edge_index[0] >= start_idx) & (edge_index[0] < end_idx) & \
+                           (edge_index[1] >= start_idx) & (edge_index[1] < end_idx)
+                
+                if edge_mask.sum() > 0:
+                    # Convert to local indices (0 to seq_len-1)
+                    current_edge_index = edge_index[:, edge_mask] - start_idx
+                    
+                    if edge_weights is not None:
+                        current_edge_weights = edge_weights[edge_mask]
+                else:
+                    # If no edges for this sample, create empty edge_index
+                    current_edge_index = torch.empty((2, 0), dtype=torch.long, device=x.device)
+                    current_edge_weights = torch.empty(0, dtype=torch.float, device=x.device) if edge_weights is not None else None
+            else:
+                # If no edges at all, create empty edge_index for this sample
+                current_edge_index = torch.empty((2, 0), dtype=torch.long, device=x.device)
+                current_edge_weights = torch.empty(0, dtype=torch.float, device=x.device) if edge_weights is not None else None
+            
+            # Process current sequence (completely independent, no cross-sample information transfer)
+            seq_output = difformer_model(current_seq, current_edge_index, current_edge_weights)
+            outputs.append(seq_output)
+        
+        # Recombine to original batch format
+        final_output = torch.cat(outputs, dim=0)  # [batch_size * seq_len, output_features]
+        
+        return final_output
+
+    def forward(self, data):
+        features, seq, edge_index, edge_attr, batch = data.features, data.seq, data.edge_index, data.edge_attr, data.batch
+        # logging.info(f"Input features shape: {features.shape}, seq shape: {seq.shape}")
+        batch_size = features.size(0)
+        initial_x = torch.cat([features, seq], dim=1)
+        x_A, x_B = torch.split(initial_x, self.window_size, dim=2)
+        # logging.info(f"x_A shape: {x_A.shape}, x_B shape: {x_B.shape}")
+        processed_A = self.conv_blocks(x_A)
+        processed_B = self.conv_blocks(x_B)
+        #logging.info(f"Processed A shape: {processed_A.shape}, Processed B shape: {processed_B.shape}")
+        
+        offset_in_bins = self.offset // self.resolution
+        # logging.info(f"Offset in bins: {offset_in_bins}")
+        pe_slice_A = self.pos_encoder.pe[:, :, :self.matrix_size].expand(processed_A.size(0), -1, -1)
+        pe_slice_B = self.pos_encoder.pe[:, :, offset_in_bins : offset_in_bins + self.matrix_size].expand(processed_B.size(0), -1, -1)
+        #logging.info(f"PE slice A: {pe_slice_A}, PE slice : {pe_slice_B}")
+        # logging.info(f"PE slice A shape: {pe_slice_A.shape}, PE slice B shape: {pe_slice_B.shape}")
+        processed_A_pe = torch.cat([processed_A, pe_slice_A], dim=1)
+        processed_B_pe = torch.cat([processed_B, pe_slice_B], dim=1)
+        # logging.info(f"Processed A with PE shape: {processed_A_pe.shape}, Processed B with PE shape: {processed_B_pe.shape}")
+        x = torch.cat([processed_A_pe, processed_B_pe], dim=2)
+        # logging.info(f"Concatenated x shape: {x.shape}")
+        x = x.transpose(1, 2).reshape(-1, self.hidden_dim)
+        # logging.info(f"Reshaped x for DIFFormer shape: {x.shape}")
+        nodes_per_sample = self.matrix_size * 2
+        edge_weights = edge_attr.float() if edge_attr is not None else torch.ones(edge_index.size(1), device=edge_index.device)
+        # logging.info(f"Edge index shape: {edge_index.shape}, Edge weights shape: {edge_weights.shape}, Batch vector shape: {batch.shape}")
+        # logging.info(batch)
+
+        processed_nodes = self.batch_difformer_forward_for_sequences(self.difformer, x,  batch_size, nodes_per_sample, edge_index, edge_weights)
+
+        region_id = data.region_id
+        mask_A = region_id == 0
+        mask_B = region_id == 1
+        
+        processed_nodes_A = processed_nodes[mask_A]
+        processed_nodes_B = processed_nodes[mask_B]
+        
+        # batch_size = len(torch.unique(batch))
+        if batch_size == 0: return torch.tensor([], device=features.device)
+        # logging.info(f"Processed nodes A shape: {processed_nodes_A.shape}, Processed nodes B shape: {processed_nodes_B.shape}")
+        features_A = processed_nodes_A.view(batch_size, self.matrix_size, -1).transpose(1, 2)
+        features_B = processed_nodes_B.view(batch_size, self.matrix_size, -1).transpose(1, 2)
+
+        node_i = features_A.unsqueeze(3).expand(-1, -1, -1, self.matrix_size)
+        node_j = features_B.unsqueeze(2).expand(-1, -1, self.matrix_size, -1)
+        pair_features = torch.cat([node_i, node_j], dim=1)
+        
+        ab_hic = data.ab_hic.view(batch_size, 1, self.matrix_size, self.matrix_size)
+        inter_hic_features = self.inter_hic_conv(ab_hic)
+        
+        combined_features = torch.cat([pair_features, inter_hic_features], dim=1)
+        combined_features = self.fusion_conv(combined_features)
+        
+        combined_features = self.res_blocks(combined_features)
+        
+        matrix_pred = self.mlp(combined_features).squeeze(1)
+        
+        return matrix_pred
 
 class GraphChIArNoSeq(nn.Module):
     def __init__(

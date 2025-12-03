@@ -1,7 +1,272 @@
+from matplotlib.colors import PowerNorm
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
 import hicstraw
+import pyBigWig
+
+def visualize_HiC_epigenetics(HiC, epis, fig_width=12.0,
+                              vmin=0, vmax=None, cmap='Reds', colorbar=True,
+                              colorbar_orientation='vertical',
+                              epi_labels=None, x_ticks=None, fontsize=24,
+                              epi_colors=None, epi_yaxis=True,
+                              heatmap_ratio=0.6, epi_ratio=0.1,
+                              interval_after_heatmap=0.05, interval_between_epi=0.01, ):
+    """
+    Visualize matched HiC and epigenetic signals in one figure
+    Args:
+        HiC (numpy.array): Hi-C contact map, only upper triangle is used.
+        epis (list): epigenetic signals
+        output (str): the output path. Must in a proper format (e.g., 'png', 'pdf', 'svg', ...).
+        fig_width (float): the width of the figure. Then the height will be automatically calculated. Default: 12.0
+        vmin (float): min value of the colormap. Default: 0
+        vmax (float): max value of the colormap. Will use the max value in Hi-C data if not specified.
+        cmap (str or plt.cm): which colormap to use. Default: 'Reds'
+        colorbar (bool): whether to add colorbar for the heatmap. Default: True
+        colorbar_orientation (str): "horizontal" or "vertical". Default: "vertical"
+        epi_labels (list): the names of epigenetic marks. If None, there will be no labels at y axis.
+        x_ticks (list): a list of strings. Will be added at the bottom. THE FIRST TICK WILL BE AT THE START OF THE SIGNAL, THE LAST TICK WILL BE AT THE END.
+        fontsize (int): font size. Default: 24
+        epi_colors (list): colors of epigenetic signals
+        epi_yaxis (bool): whether add y-axis to epigenetic signals. Default: True
+        heatmap_ratio (float): the ratio of (heatmap height) and (figure width). Default: 0.6
+        epi_ratio (float): the ratio of (1D epi signal height) and (figure width). Default: 0.1
+        interval_after_heatmap (float): the ratio of (interval between heatmap and 1D signals) and (figure width). Default: 0.05
+        interval_between_epi (float): the ratio of (interval between 1D signals) and (figure width). Default: 0.01
+
+    No return. Save a figure only.
+    """
+
+    # Make sure the lengths match
+    # len_epis = [len(epi) for epi in epis]
+    # if max(len_epis) != min(len_epis) or max(len_epis) != len(HiC):
+    #     raise ValueError('Size not matched!')
+    N = len(HiC)
+
+    # Define the space for each row (heatmap - interval - signal - interval - signal ...)
+    rs = [heatmap_ratio, interval_after_heatmap] + [epi_ratio, interval_between_epi] * len(epis)
+    rs = np.array(rs[:-1])
+
+    # Calculate figure height
+    fig_height = fig_width * np.sum(rs)
+    rs = rs / np.sum(rs)  # normalize to 1 (ratios)
+    fig = plt.figure(figsize=(fig_width, fig_height))
+
+    # Split the figure into rows with different heights
+    gs = GridSpec(len(rs), 1, height_ratios=rs)
+
+    # Ready for plotting heatmap
+    ax0 = plt.subplot(gs[0, :])
+    # Define the rotated axes and coordinates
+    coordinate = np.array([[[(x + y) / 2, y - x] for y in range(N + 1)] for x in range(N + 1)])
+    X, Y = coordinate[:, :, 0], coordinate[:, :, 1]
+    # Plot the heatmap
+    
+    vmax = vmax if vmax is not None else np.percentile(HiC, 99.5)
+    im = ax0.pcolormesh(X, Y, HiC, vmin=vmin, vmax=vmax, cmap=cmap)
+    ax0.axis('off')
+    ax0.set_ylim([0, N])
+    ax0.set_xlim([0, N])
+    if colorbar:
+        if colorbar_orientation == 'horizontal':
+            _left, _width, _bottom, _height = 0.12, 0.25, 1 - rs[0] * 0.25, rs[0] * 0.03
+        elif colorbar_orientation == 'vertical':
+            _left, _width, _bottom, _height = 0.9, 0.02, 1 - rs[0] * 0.7, rs[0] * 0.5
+        else:
+            raise ValueError('Wrong orientation!')
+        cbar = plt.colorbar(im, cax=fig.add_axes([_left, _bottom, _width, _height]),
+                            orientation=colorbar_orientation)
+        cbar.ax.tick_params(labelsize=fontsize)
+        cbar.outline.set_visible(False)
+
+    # print(rs/np.sum(rs))
+    # Ready for plotting 1D signals
+    if epi_labels:
+        assert len(epis) == len(epi_labels)
+    if epi_colors:
+        assert len(epis) == len(epi_colors)
+
+    for i, epi in enumerate(epis):
+        # print(epi.shape)
+        ax1 = plt.subplot(gs[2 + 2 * i, :])
+
+        if epi_colors:
+            ax1.fill_between(np.arange(N), 0, epi, color=epi_colors[i])
+        else:
+            ax1.fill_between(np.arange(N), 0, epi)
+        ax1.spines['left'].set_visible(False)
+        ax1.spines['right'].set_visible(False)
+        ax1.spines['top'].set_visible(False)
+        ax1.spines['bottom'].set_visible(False)
+
+        if not epi_yaxis:
+            ax1.set_yticks([])
+            ax1.set_yticklabels([])
+        else:
+            ax1.spines['right'].set_visible(True)
+            ax1.tick_params(labelsize=fontsize)
+            ax1.yaxis.tick_right()
+
+        if i != len(epis) - 1:
+            ax1.set_xticks([])
+            ax1.set_xticklabels([])
+        # ax1.axis('off')
+        # ax1.xaxis.set_visible(True)
+        # plt.setp(ax1.spines.values(), visible=False)
+        # ax1.yaxis.set_visible(True)
+
+        ax1.set_xlim([-0.5, N - 0.5])
+        if epi_labels:
+            ax1.set_ylabel(epi_labels[i], fontsize=fontsize, rotation=0)
+    ax1.spines['bottom'].set_visible(True)
+    if x_ticks:
+        tick_pos = np.linspace(0, N - 1, len(x_ticks))  # 这个坐标其实是不对的 差1个bin 但是为了ticks好看只有先这样了
+        ax1.set_xticks(tick_pos)
+        ax1.set_xticklabels(x_ticks, fontsize=fontsize)
+    else:
+        ax1.set_xticks([])
+        ax1.set_xticklabels([])
+
+    # plt.savefig(output)
+    plt.show()
+    plt.close()
+
+def visualize_multiple_HiC(HiCs, fig_width=18.0,
+                          vmin=0, vmax=None, cmap='Reds', colorbar=True,
+                          colorbar_orientation='vertical',
+                          hic_labels=None, x_ticks=None, fontsize=24,
+                          heatmap_ratio=0.6,
+                          interval_between_hic=0.1):
+    """
+    Visualize multiple Hi-C contact maps in one figure
+    
+    Args:
+        HiCs (list): List of Hi-C contact maps, each is a numpy.array. Only upper triangles are used.
+        fig_width (float): the width of the figure. Then the height will be automatically calculated. Default: 18.0
+        vmin (float): min value of the colormap. Default: 0
+        vmax (float or list): max value of the colormap. Will use the max value in Hi-C data if not specified.
+                             Can be a list for per-heatmap vmax settings.
+        cmap (str or plt.cm or list): which colormap to use. Can be a list for different Hi-C maps.
+        colorbar (bool): whether to add colorbar for the heatmap. Default: True
+        colorbar_orientation (str): "horizontal" or "vertical". Default: "vertical"
+        hic_labels (list): labels for each Hi-C map. Default: None
+        x_ticks (list or list of lists): a list of strings for x-axis ticks.
+                                        Can be a list of lists for different Hi-C blocks.
+        fontsize (int): font size. Default: 24
+        heatmap_ratio (float): the ratio of (heatmap height) and (figure width). Default: 0.6
+        interval_between_hic (float): the ratio of (interval between Hi-C blocks) and (figure width). Default: 0.1
+
+    No return. Display a figure.
+    """
+    import matplotlib.pyplot as plt
+    import numpy as np
+    from matplotlib.gridspec import GridSpec
+    
+    # Check inputs
+    n_hic = len(HiCs)
+    
+    # Handle vmax as a list or single value
+    if vmax is None:
+        vmax = [np.percentile(hic, 99.5) for hic in HiCs]
+    elif not isinstance(vmax, list):
+        vmax = [vmax] * n_hic
+        
+    # Handle cmap as a list or single value
+    if not isinstance(cmap, list):
+        cmap = [cmap] * n_hic
+        
+    # Get the size of each Hi-C matrix
+    sizes = [len(hic) for hic in HiCs]
+    
+    # Define the space for each row (heatmap - interval - heatmap - interval - ...)
+    rs = [heatmap_ratio] * n_hic
+    # Add intervals between heatmaps
+    full_ratios = []
+    for i, ratio in enumerate(rs):
+        full_ratios.append(ratio)
+        if i < len(rs) - 1:  # Don't add interval after the last heatmap
+            full_ratios.append(interval_between_hic)
+    
+    full_ratios = np.array(full_ratios)
+    
+    # Calculate figure height
+    fig_height = fig_width * np.sum(full_ratios)
+    full_ratios = full_ratios / np.sum(full_ratios)  # normalize to 1 (ratios)
+    
+    # Create figure
+    fig = plt.figure(figsize=(fig_width, fig_height))
+    
+    # Split the figure into rows with different heights
+    gs = GridSpec(len(full_ratios), 1, height_ratios=full_ratios)
+    
+    # Track current row in the grid
+    current_row = 0
+    
+    # Plot each Hi-C block
+    for i, hic in enumerate(HiCs):
+        N = sizes[i]
+        
+        # Plot Hi-C heatmap
+        ax_hic = plt.subplot(gs[current_row, :])
+        
+        # Define the rotated axes and coordinates for Hi-C
+        coordinate = np.array([[[(x + y) / 2, y - x] for y in range(N + 1)] for x in range(N + 1)])
+        X, Y = coordinate[:, :, 0], coordinate[:, :, 1]
+        
+        # Plot the heatmap
+        im = ax_hic.pcolormesh(X, Y, hic, vmin=vmin, vmax=vmax[i], cmap=cmap[i])
+        ax_hic.axis('off')
+        ax_hic.set_ylim([0, N])
+        ax_hic.set_xlim([0, N])
+        
+        # Add Hi-C label at the bottom of the heatmap instead of the title
+        if hic_labels and i < len(hic_labels):
+            # Position the text at the bottom of the heatmap
+            ax_hic.text(N/2, -N*0.05, hic_labels[i], 
+                       horizontalalignment='center', 
+                       verticalalignment='top', 
+                       fontsize=fontsize)
+        
+        # Add colorbar if requested and for the first heatmap
+        if colorbar and i == 0:
+            if colorbar_orientation == 'horizontal':
+                _left, _width, _bottom, _height = 0.12, 0.25, 1 - full_ratios[0] * 0.25, full_ratios[0] * 0.03
+            elif colorbar_orientation == 'vertical':
+                _left, _width, _bottom, _height = 0.9, 0.02, 1 - full_ratios[0] * 0.7, full_ratios[0] * 0.5
+            else:
+                raise ValueError('Wrong orientation!')
+            
+            # Calculate position in normalized figure coordinates
+            cbar = plt.colorbar(im, cax=fig.add_axes([_left, _bottom, _width, _height]),
+                                orientation=colorbar_orientation)
+            cbar.ax.tick_params(labelsize=fontsize)
+            cbar.outline.set_visible(False)
+        
+        # Add x-ticks if specified
+        if x_ticks:
+            # Add a visible bottom spine for x-ticks
+            ax_hic.spines['bottom'].set_visible(True)
+            
+            # Determine which x_ticks to use for this heatmap
+            block_x_ticks = None
+            if isinstance(x_ticks[0], list):  # x_ticks is a list of lists
+                if i < len(x_ticks):
+                    block_x_ticks = x_ticks[i]
+            else:  # x_ticks is a single list for all heatmaps
+                block_x_ticks = x_ticks
+                
+            if block_x_ticks:
+                tick_pos = np.linspace(0, N - 1, len(block_x_ticks))
+                ax_hic.set_xticks(tick_pos)
+                ax_hic.set_xticklabels(block_x_ticks, fontsize=fontsize)
+                ax_hic.tick_params(axis='x', which='both', bottom=True)
+        
+        # Move to next row, including interval
+        current_row += 2 if i < n_hic - 1 else 1
+    
+    plt.tight_layout()
+    plt.show()
+    plt.close()
 
 def visualize_multiple_HiC_with_epigenetics(HiCs, epis=None, fig_width=6,
                                           vmin=0, vmax=None, cmap='Reds', colorbar=True,
@@ -47,8 +312,35 @@ def visualize_multiple_HiC_with_epigenetics(HiCs, epis=None, fig_width=6,
     No return. Display a figure.
     """
     import matplotlib.pyplot as plt
+    import matplotlib.font_manager as fm
     import numpy as np
     from matplotlib.gridspec import GridSpec
+    
+    # Set font family with fallback options (borrowed from PlotConfig)
+    def _set_font():
+        font_options = [
+            'Times New Roman',
+            'serif',
+            'DejaVu Serif',
+            'Liberation Serif'
+        ]
+        
+        # Get available fonts
+        available_fonts = [f.name for f in fm.fontManager.ttflist]
+        
+        # Find first available font from options
+        for font in font_options:
+            if font in available_fonts or font in ['serif', 'sans-serif', 'monospace']:
+                return font
+        
+        # Fallback to default if none found
+        return 'serif'
+    
+    # Set font to Times New Roman with fallback
+    selected_font = _set_font()
+    plt.rcParams['font.family'] = selected_font
+    if selected_font == 'Times New Roman':
+        plt.rcParams['font.serif'] = ['Times New Roman']
     
     # Check inputs
     n_hic = len(HiCs)
@@ -61,6 +353,7 @@ def visualize_multiple_HiC_with_epigenetics(HiCs, epis=None, fig_width=6,
     # Handle vmax as a list or single value
     if vmax is None:
         vmax = [np.percentile(hic, maxperc) for hic in HiCs]
+        vmax = [1 if v == 0 else v for v in vmax]
     elif not isinstance(vmax, list):
         vmax = [vmax] * n_hic
         
@@ -93,9 +386,7 @@ def visualize_multiple_HiC_with_epigenetics(HiCs, epis=None, fig_width=6,
     epi_ratios = []
     for i in range(n_epi):
         epi_ratios.append(epi_ratio)
-        if i < n_epi - 1:  # Add interval between epigenetic signals
-            # 修复: 这里如果interval_between_epi为0或非常小，我们应该避免添加额外空间
-            # 只有当间隔值大于某个最小阈值时才添加
+        if i < n_epi - 1:  # Add interval between epigenetic signal
             if interval_between_epi > 0.001:
                 epi_ratios.append(interval_between_epi)
     
@@ -127,7 +418,8 @@ def visualize_multiple_HiC_with_epigenetics(HiCs, epis=None, fig_width=6,
         X, Y = coordinate[:, :, 0], coordinate[:, :, 1]
         
         # Plot the heatmap
-        im = ax_hic.pcolormesh(X, Y, hic, vmin=vmin, vmax=vmax[i], cmap=cmap[i])
+        im = ax_hic.pcolormesh(X, Y, hic, vmin=vmin, vmax=vmax[i], cmap=cmap[i], antialiased=False,
+                       shading='auto')
         ax_hic.axis('off')
         ax_hic.set_ylim([0, N])
         ax_hic.set_xlim([0, N])
@@ -139,7 +431,8 @@ def visualize_multiple_HiC_with_epigenetics(HiCs, epis=None, fig_width=6,
                        horizontalalignment='center', 
                        verticalalignment='top', 
                        fontsize=label_fontsize, 
-                       fontweight='normal'
+                       fontweight='normal',
+                       fontfamily=selected_font
                        )
         
         # Add colorbar if requested for the first heatmap
@@ -155,6 +448,9 @@ def visualize_multiple_HiC_with_epigenetics(HiCs, epis=None, fig_width=6,
             cbar = plt.colorbar(im, cax=fig.add_axes([_left, _bottom, _width, _height]),
                                 orientation=colorbar_orientation)
             cbar.ax.tick_params(labelsize=colorbar_fontsize)
+            # Set colorbar tick labels font
+            for label in cbar.ax.get_xticklabels() + cbar.ax.get_yticklabels():
+                label.set_fontfamily(selected_font)
             cbar.outline.set_visible(False)
         
         # Move to next row, including interval between Hi-C maps
@@ -190,6 +486,9 @@ def visualize_multiple_HiC_with_epigenetics(HiCs, epis=None, fig_width=6,
             ax_epi.spines['right'].set_visible(True)
             ax_epi.tick_params(labelsize=tick_fontsize)
             ax_epi.yaxis.tick_right()
+            # Set y-axis tick labels font
+            for label in ax_epi.get_yticklabels():
+                label.set_fontfamily(selected_font)
         
         # Only show x-ticks on the last signal
         is_last_epi = (i == n_epi - 1)
@@ -202,7 +501,7 @@ def visualize_multiple_HiC_with_epigenetics(HiCs, epis=None, fig_width=6,
         
         # 修改: 将标签放在左侧
         if epi_labels and i < len(epi_labels):
-            ax_epi.set_ylabel(epi_labels[i], fontsize=label_fontsize, rotation=0, fontweight='normal')
+            ax_epi.set_ylabel(epi_labels[i], fontsize=label_fontsize, rotation=0, fontweight='normal', fontfamily=selected_font)
             # 将标签放在Y轴左侧，并调整位置
             ax_epi.yaxis.set_label_coords(-0.15, 0.5)
         
@@ -221,6 +520,9 @@ def visualize_multiple_HiC_with_epigenetics(HiCs, epis=None, fig_width=6,
                     tick_pos = np.linspace(0, N - 1, len(block_x_ticks))
                     ax_epi.set_xticks(tick_pos)
                     ax_epi.set_xticklabels(block_x_ticks, fontsize=tick_fontsize)
+                    # Set x-axis tick labels font
+                    for label in ax_epi.get_xticklabels():
+                        label.set_fontfamily(selected_font)
                     # 增大x轴刻度标签的大小
                     ax_epi.tick_params(axis='x', labelsize=tick_fontsize)
                     ax_epi.tick_params(axis='x', which='both', length=0)
@@ -247,9 +549,150 @@ def visualize_multiple_HiC_with_epigenetics(HiCs, epis=None, fig_width=6,
     
     plt.tight_layout()
     if output != None:
-        plt.savefig(output, bbox_inches='tight',dpi=300)  # 增加DPI以获得更高质量的输出
+        plt.savefig(output, bbox_inches='tight',dpi=600)  # 增加DPI以获得更高质量的输出
         print(f"Plot saved to {output}")
     plt.show()
     plt.close()
 
+def _read_hic_matrix(hic_file, chrom, start, end, res,log1p=False, normalization = 'NONE'):
+        """
+        Reads a Hi-C interaction matrix for a specified genomic region from a Hi-C file.
+        Args:
+            hic_file (str): Path to the Hi-C file.
+            chrom (str): Chromosome name.
+            start (int): Start position of the genomic region.
+            end (int): End position of the genomic region.
+        Returns:
+            csr_matrix: A sparse matrix representing the Hi-C interaction matrix for the specified region.
+        The function uses the hicstraw library to extract observed interaction values for the specified region.
+        It constructs a sparse matrix from these values, ensuring that the matrix is symmetric and the diagonal
+        values are halved. If an error occurs during the process, an empty sparse matrix of the appropriate size
+        is returned.
+        """
+        try:
+            # Construct the Hi-C location string
+            chrom = chrom.replace('chr', '')
+            loc = f'{chrom}:{start}:{end}'
+            # Extract Hi-C interaction values
+            result = hicstraw.straw('observed', normalization, hic_file, loc, loc, 'BP', res)
+            
+            num_bins = (end - start) // res
+            # Use lil_matrix for more efficient sparse matrix construction
+            hic_matrix = np.zeros((num_bins, num_bins), dtype=np.float32)
+            
+            for entry in result:
+                bin_x = (entry.binX - start) // res
+                bin_y = (entry.binY - start) // res
+                
+                if 0 <= bin_x < num_bins and 0 <= bin_y < num_bins:
+                    hic_matrix[bin_x, bin_y] = entry.counts
+                    hic_matrix[bin_y, bin_x] = entry.counts
+            
+            
+            if log1p:
+                hic_matrix = np.log1p(hic_matrix)
+            return hic_matrix
+        except Exception as e:
+            print(f'Error reading Hi-C matrix for {chrom}:{start}-{end}: {str(e)}')
+            num_bins = (end - start) // res
+            return np.zeros((num_bins, num_bins), dtype=np.float32)
+        
 
+
+def read_bigwig_signal(bw_file, chrom, start, end, res):
+    """
+    Reads a signal from a BigWig file for a specified genomic region.
+    """
+    with pyBigWig.open(bw_file) as bw:
+        return np.nan_to_num(bw.values(chrom, start, end))
+
+def load_and_visualize_region(chrom, start, end, hic_files_config, bigwig_files_config, pred_file_config=None, fig_width=6.0, maxperc=99.5, output=None, **kwargs):
+    """
+    Loads and visualizes Hi-C and epigenetic data for a given genomic region.
+
+    Args:
+        chrom (str): Chromosome name (e.g., 'chr10').
+        start (int): Start position of the genomic region.
+        end (int): End position of the genomic region.
+        hic_files_config (dict): Configuration for Hi-C files.
+                                Example: {'RAD21 ChIA-PET': {'path': 'path/to/file.hic', 'resolution': 10000}}
+        bigwig_files_config (dict): Configuration for BigWig files.
+                                   Example: {'RAD21': 'path/to/file.bw'}
+        pred_file_config (dict, optional): Configuration for the predicted data file. 
+                                Example: {'label': 'Predicted 10kb', 'path': 'path/to/pred.npy', 'log1p': True}
+        fig_width (float): The width of the figure. Default: 6.0
+        maxperc (float): Maximum percentile for color scale normalization. Default: 99.5
+        output (str, optional): Output file path. If None, only display the figure.
+        **kwargs: Additional arguments to pass to visualize_multiple_HiC_with_epigenetics
+    """
+    # --- Load Hi-C data ---
+    hic_data = []
+    hic_labels = []
+    
+    for label, config in hic_files_config.items():
+        data = _read_hic_matrix(config['path'], chrom, start, end, config['resolution'], log1p=False)
+        hic_data.append(data)
+        hic_labels.append(label)
+
+    # --- Load predicted data if provided ---
+    if pred_file_config:
+        pred_data = np.load(pred_file_config['path'])
+        # Handle log1p transformation if needed
+        if pred_file_config.get('log1p', False):
+            pred_data = np.expm1(pred_data)
+        
+        # Insert prediction at the beginning or end based on config
+        insert_at_start = pred_file_config.get('insert_at_start', True)
+        if insert_at_start:
+            hic_data.insert(0, pred_data)
+            hic_labels.insert(0, pred_file_config['label'])
+        else:
+            hic_data.append(pred_data)
+            hic_labels.append(pred_file_config['label'])
+
+    # --- Load epigenetic data ---
+    epi_data = []
+    epi_labels = []
+    resolution = (end - start) // len(hic_data[0])  # Calculate resolution from matrix size
+    
+    for label, bw_path in bigwig_files_config.items():
+        bw = pyBigWig.open(bw_path)
+        signal = bw.stats(chrom, start, end, type='mean', nBins=len(hic_data[0]))
+        signal = np.array(signal)
+        signal = np.nan_to_num(signal)
+        bw.close()
+        
+        epi_data.append(signal)
+        epi_labels.append(label)
+
+    # --- Set default visualization parameters ---
+    viz_params = {
+        'colorbar': False,
+        'interval_between_hic': 0,
+        'interval_after_hic_block': 0.05,
+        'interval_between_epi': 0.05,
+        'x_ticks': [f'{start/1000000}MB', chrom, f'{end/1000000}MB'],
+        'fontsize': 16,
+        'label_fontsize': 14,
+        'tick_fontsize': 12,
+        'colorbar_fontsize': 14,
+        'maxperc': maxperc
+    }
+    
+    # Update with any user-provided parameters
+    viz_params.update(kwargs)
+
+    # --- Visualize the data ---
+    visualize_multiple_HiC_with_epigenetics(
+        HiCs=hic_data,
+        epis=epi_data,
+        hic_labels=hic_labels,
+        epi_labels=epi_labels,
+        fig_width=fig_width,
+        output=output,
+        **viz_params
+    )
+    
+    print(f"Visualized region {chrom}:{start}-{end}")
+    if output:
+        print(f"Saved to: {output}")

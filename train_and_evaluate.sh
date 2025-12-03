@@ -3,7 +3,7 @@
 # Function to show usage
 show_usage() {
     echo "Usage: $0 [options]"
-    echo "Example: $0 --step_size 500000 --window_size 2000000 --resolution 10000 --normalize NONE --batch_size 32 --patience 8 --vis_samples 10 --log1p true --worker_num 4 --train-celltype GM12878 --test-celltypes \"K562 IMR90\" --target-type \"chia-pet\" --chipseq \"ctcf H3K4me3 H3K27ac\""
+    echo "Example: $0 --step_size 500000 --window_size 2000000 --resolution 10000 --normalize KR --batch_size 32 --patience 8 --vis_samples 10 --log1p true --worker_num 4 --train-celltype GM12878 --test-celltypes \"K562 IMR90\" --target-type \"chia-pet\" --chipseq \"ctcf H3K4me3 H3K27ac\""
     echo ""
     echo "Options:"
     echo "  --step_size    Step size for sliding window (default: 500000)"
@@ -15,6 +15,7 @@ show_usage() {
     echo "  --batch_size   Batch size for training (default: 32)"
     echo "  --patience     Early stopping patience (default: 8)"
     echo "  --max_epochs   Maximum number of training epochs (default: 40)"
+    echo "  --vis_samples  Number of random windows to visualize (default: 10)"
     echo "  --log1p        Apply log1p transformation to data (default: true)"
     echo "  --worker_num   Number of worker processes for data loading (default: 4)"
     echo "  --train-celltype Cell type to use for training (default: GM12878)"
@@ -23,18 +24,23 @@ show_usage() {
     echo "  --chipseq      Space-separated list of ChIP-seq features to use (default: ctcf)"
     echo "  --hic-format   Format of Hi-C files to use: 'hic', 'cool', or 'mcool' (default: hic)"
     echo "  --target-format Format of target files to use: 'hic', 'cool', or 'mcool' (default: same as hic-format)"
+    echo "  --interpolate   Whether to interpolate Hi-C and ChIA-PET matrices to 5x resolution (default: false)"
+    echo "  --skip-train   Skip the training step and use existing checkpoint (default: false)"
+    echo "  --load-experiment-name Experiment name to load checkpoint from when skipping training (default: none)"
     exit 1
 }
 
 # Default values
+OFFSET=0
 STEP_SIZE=500000
 WINDOW_SIZE=2000000
 RESOLUTION=10000
 NORMALIZE="NONE"
-MODEL="GraphChIAr"
+MODEL="ChIAPETMatrixPredictor"
 BATCH_SIZE=32
 PATIENCE=8
 MAX_EPOCHS=40
+VIS_SAMPLES=10
 LEARNING_RATE=0.0001
 LOG1P="true"
 WORKER_NUM=4  
@@ -44,10 +50,17 @@ TARGET_TYPE="CTCF_ChIA-PET"  # Default target type
 CHIPSEQ=("ctcf")     # Default ChIP-seq features
 HIC_FORMAT="hic"     # Default Hi-C file format
 TARGET_FORMAT=""     # By default, use same format as HIC_FORMAT
+INTERPOLATE="false"  # Default interpolate setting
+SKIP_TRAIN="false"   # Default skip train setting
+LOAD_EXPERIMENT_NAME="" # Default load experiment name setting
 
 # Parse named parameters
 while [[ $# -gt 0 ]]; do
     case $1 in
+        --offset)
+            OFFSET="$2"
+            shift 2
+            ;;
         --step_size)
             STEP_SIZE="$2"
             shift 2
@@ -88,6 +101,10 @@ while [[ $# -gt 0 ]]; do
             MAX_EPOCHS="$2"
             shift 2
             ;;
+        --vis_samples)
+            VIS_SAMPLES="$2"
+            shift 2
+            ;;
         --log1p)
             LOG1P="$2"
             shift 2
@@ -122,6 +139,18 @@ while [[ $# -gt 0 ]]; do
             TARGET_FORMAT="$2"
             shift 2
             ;;
+        --interpolate)
+            INTERPOLATE="$2"
+            shift 2
+            ;;
+        --skip-train)
+            SKIP_TRAIN="true"
+            shift 1
+            ;;
+        --load-experiment-name)
+            LOAD_EXPERIMENT_NAME="$2"
+            shift 2
+            ;;
         *)
             echo "Unknown parameter: $1"
             show_usage
@@ -147,17 +176,23 @@ fi
 
 # Generate experiment name using date, cell type, resolution and log1p setting
 CURRENT_DATE=$(date +%y%m%d)
-EXPERIMENT_NAME="${CURRENT_DATE}_${TRAIN_CELLTYPE}_${RESOLUTION}_${NORMALIZE}_${MODEL}_${TARGET_TYPE}_log1p_${LOG1P}_hictype_${HIC_FORMAT}_chiatype_${TARGET_FORMAT}"
+# EXPERIMENT_NAME="${CURRENT_DATE}_${TRAIN_CELLTYPE}_${RESOLUTION}_${NORMALIZE}_${MODEL}_${TARGET_TYPE}_log1p_${LOG1P}_hictype_${HIC_FORMAT}_chiatype_${TARGET_FORMAT}"
+EXPERIMENT_NAME="${CURRENT_DATE}_${TRAIN_CELLTYPE}_${RESOLUTION}_${MODEL}_offset${OFFSET}"
+
 if [ -n "${HIC_RESOLUTION}" ]; then
     EXPERIMENT_NAME="${EXPERIMENT_NAME}_hicres_${HIC_RESOLUTION}"
 fi
+# Add interpolate to experiment name if enabled
+if [ "${INTERPOLATE}" = "true" ]; then
+    EXPERIMENT_NAME="${EXPERIMENT_NAME}_interpolate_5x"
+fi
 
 # Set base directories
-BASE_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+BASE_DIR="/home/dh/work/gChIA"
 DATA_DIR="${BASE_DIR}/data"
 PROCESSED_DATA_DIR="${BASE_DIR}/ProcessedData"
 RESULTS_DIR="${BASE_DIR}/results/${EXPERIMENT_NAME}"
-SRC_DIR="${BASE_DIR}/gchia"
+SRC_DIR="${BASE_DIR}/src/gchia"
 
 # Create necessary directories
 echo "Creating results directory: ${RESULTS_DIR}"
@@ -177,13 +212,16 @@ echo "Window Size: ${WINDOW_SIZE}" >> ${PARAM_FILE}
 echo "Resolution: ${RESOLUTION}" >> ${PARAM_FILE}
 echo "Normalization: ${NORMALIZE}" >> ${PARAM_FILE}
 echo "Log1p Transformation: ${LOG1P}" >> ${PARAM_FILE}
+echo "Interpolate: ${INTERPOLATE}" >> ${PARAM_FILE}
 echo "Model: ${MODEL}" >> ${PARAM_FILE}
 echo "Batch Size: ${BATCH_SIZE}" >> ${PARAM_FILE}
 echo "Worker Number: ${WORKER_NUM}" >> ${PARAM_FILE}  
 echo "Patience: ${PATIENCE}" >> ${PARAM_FILE}
 echo "Max Epochs: ${MAX_EPOCHS}" >> ${PARAM_FILE}
+echo "Visualization Samples: ${VIS_SAMPLES}" >> ${PARAM_FILE}
 echo "Hi-C File Format: ${HIC_FORMAT}" >> ${PARAM_FILE}
 echo "Target File Format: ${TARGET_FORMAT}" >> ${PARAM_FILE}
+echo "Skip Train: ${SKIP_TRAIN}" >> ${PARAM_FILE}
 echo "" >> ${PARAM_FILE}
 echo "Directory Structure:" >> ${PARAM_FILE}
 echo "Base Directory: ${BASE_DIR}" >> ${PARAM_FILE}
@@ -207,12 +245,15 @@ echo "Window size: ${WINDOW_SIZE}"
 echo "Resolution: ${RESOLUTION}"
 echo "Normalization: ${NORMALIZE}"
 echo "Log1p Transformation: ${LOG1P}"
+echo "Interpolate: ${INTERPOLATE}"
 echo "Model: ${MODEL}"
 echo "Learning Rate: ${LEARNING_RATE}"
 echo "Batch Size: ${BATCH_SIZE}"
 echo "Worker Number: ${WORKER_NUM}" 
 echo "Patience: ${PATIENCE}"
 echo "Max Epochs: ${MAX_EPOCHS}"
+echo "Visualization Samples: ${VIS_SAMPLES}"
+echo "Skip Train: ${SKIP_TRAIN}"
 echo "Parameters saved to: ${PARAM_FILE}"
 echo "-----------------------------------"
 
@@ -326,42 +367,63 @@ if [ -n "${HIC_RESOLUTION}" ]; then
     HIC_RES_FLAG="--hic_resolution ${HIC_RESOLUTION}"
 fi
 
+# Create interpolate flag for Python scripts
+INTERPOLATE_FLAG=""
+if [ "${INTERPOLATE}" = "true" ]; then
+    INTERPOLATE_FLAG="--interpolate True"
+else
+    INTERPOLATE_FLAG="--interpolate False"
+fi
+
 echo "Data preprocessing completed: $(date '+%Y-%m-%d %H:%M:%S')" >> ${PARAM_FILE}
 # Step 1: Training
-echo "Starting model training..."
-echo "" >> ${PARAM_FILE}
-echo "Training started: $(date '+%Y-%m-%d %H:%M:%S')" >> ${PARAM_FILE}
+if [ "${SKIP_TRAIN}" = "false" ]; then
+    echo "Starting model training..."
+    echo "" >> ${PARAM_FILE}
+    echo "Training started: $(date '+%Y-%m-%d %H:%M:%S')" >> ${PARAM_FILE}
 
-python ${SRC_DIR}/Train/train.py \
-    --seed 42 \
-    --save_path "${RESULTS_DIR}" \
-    --model "${MODEL}" \
-    --data-root "${PROCESSED_DATA_DIR}" \
-    --celltype "${TRAIN_CELLTYPE}" \
-    --hic-file "${TRAIN_HIC_FILE}" \
-    --chia-pet-file "${TRAIN_TARGET_FILE}" \
-    --chipseq-files ${TRAIN_CHIPSEQ_CMD_ARG} \
-    --chr-sizes-file "${DATA_DIR}/ReferenceGenome/hg38/hg38.chrom.sizes" \
-    --target-type "${TARGET_TYPE}" \
-    --patience ${PATIENCE} \
-    --max_epochs ${MAX_EPOCHS} \
-    --save_top_k 60 \
-    --lr ${LEARNING_RATE} \
-    --batch_size ${BATCH_SIZE} \
-    --num_workers ${WORKER_NUM} \
-    --step_size ${STEP_SIZE} \
-    --window_size ${WINDOW_SIZE} \
-    --resolution ${RESOLUTION} \
-    --normalize ${NORMALIZE} \
-    ${LOG1P_FLAG} \
-    ${HIC_RES_FLAG}
+    python ${SRC_DIR}/Train/train.py \
+        --seed 42 \
+        --save_path "${RESULTS_DIR}" \
+        --model "${MODEL}" \
+        --data-root "${PROCESSED_DATA_DIR}" \
+        --celltype "${TRAIN_CELLTYPE}" \
+        --hic-file "${TRAIN_HIC_FILE}" \
+        --chia-pet-file "${TRAIN_TARGET_FILE}" \
+        --chipseq-files ${TRAIN_CHIPSEQ_CMD_ARG} \
+        --chr-sizes-file "${DATA_DIR}/ReferenceGenome/hg38/hg38.chrom.sizes" \
+        --target-type "${TARGET_TYPE}" \
+        --patience ${PATIENCE} \
+        --max_epochs ${MAX_EPOCHS} \
+        --save_top_k 60 \
+        --offset "${OFFSET}" \
+        --lr ${LEARNING_RATE} \
+        --batch_size ${BATCH_SIZE} \
+        --num_workers ${WORKER_NUM} \
+        --step_size ${STEP_SIZE} \
+        --window_size ${WINDOW_SIZE} \
+        --resolution ${RESOLUTION} \
+        --normalize ${NORMALIZE} \
+        ${LOG1P_FLAG} \
+        ${HIC_RES_FLAG} \
+        ${INTERPOLATE_FLAG}
 
-echo "Training completed: $(date '+%Y-%m-%d %H:%M:%S')" >> ${PARAM_FILE}
+    echo "Training completed: $(date '+%Y-%m-%d %H:%M:%S')" >> ${PARAM_FILE}
+else
+    echo "Skipping training step as per --skip-train flag." | tee -a ${PARAM_FILE}
+fi
+
+# Determine checkpoint directory
+CHECKPOINT_LOAD_DIR="${RESULTS_DIR}"
+if [ "${SKIP_TRAIN}" = "true" ] && [ -n "${LOAD_EXPERIMENT_NAME}" ]; then
+    CHECKPOINT_LOAD_DIR="${BASE_DIR}/results/${LOAD_EXPERIMENT_NAME}"
+    echo "Loading checkpoint from specified experiment: ${LOAD_EXPERIMENT_NAME}" | tee -a ${PARAM_FILE}
+fi
 
 # Get the latest checkpoint file
-CHECKPOINT_FILE=$(ls -t ${RESULTS_DIR}/model-${TRAIN_CELLTYPE}/epoch*.ckpt 2>/dev/null | head -n1)
+CHECKPOINT_FILE=$(ls -t ${CHECKPOINT_LOAD_DIR}/model-${TRAIN_CELLTYPE}/epoch*.ckpt 2>/dev/null | head -n1)
 if [ -z "$CHECKPOINT_FILE" ]; then
-    echo "Error: No checkpoint file found in ${RESULTS_DIR}/model-${TRAIN_CELLTYPE}/"
+    echo "Error: No checkpoint file found in ${CHECKPOINT_LOAD_DIR}/model-${TRAIN_CELLTYPE}/"
     exit 1
 fi
 echo "Using checkpoint file: ${CHECKPOINT_FILE}" | tee -a ${PARAM_FILE}
@@ -411,6 +473,7 @@ for TEST_CELL in "${TEST_CELLTYPES[@]}"; do
         --chr-sizes-file "${DATA_DIR}/ReferenceGenome/hg38/hg38.chrom.sizes" \
         --model "${MODEL}" \
         --target-type "${TARGET_TYPE}" \
+        --offset "${OFFSET}" \
         --checkpoint-path "${CHECKPOINT_FILE}" \
         --save-dir "${PREDICTION_DIR}/predictions" \
         --batch_size ${BATCH_SIZE} \
@@ -420,18 +483,35 @@ for TEST_CELL in "${TEST_CELLTYPES[@]}"; do
         --resolution ${RESOLUTION} \
         --normalize ${NORMALIZE} \
         ${LOG1P_FLAG} \
-        ${HIC_RES_FLAG}
+        ${HIC_RES_FLAG} \
+        ${INTERPOLATE_FLAG}
 done
 
 echo "Predictions completed: $(date '+%Y-%m-%d %H:%M:%S')" >> ${PARAM_FILE}
 
-# Step 3: Metrics Calculation
-echo "Starting metrics calculation..."
+if [ "${OFFSET}" -ne 0 ]; then
+    echo "Offset mode detected (offset=${OFFSET}). Skipping visualization and metrics calculation steps." | tee -a ${PARAM_FILE}
+    echo "Pipeline completed for offset model training and testing."
+    exit 0
+fi
+# Step 3: Visualization
+echo "Starting visualization..."
 echo "" >> ${PARAM_FILE}
-echo "Metrics calculation started: $(date '+%Y-%m-%d %H:%M:%S')" >> ${PARAM_FILE}
+echo "Visualization started: $(date '+%Y-%m-%d %H:%M:%S')" >> ${PARAM_FILE}
+echo "Number of random windows to visualize: ${VIS_SAMPLES}" >> ${PARAM_FILE}
+
+
+PROCESSED_DIR_NAME="processed_${RESOLUTION}_${WINDOW_SIZE}_${NORMALIZE}_log1p_${LOG1P}_hictype_${HIC_FORMAT}_chiatype_${TARGET_FORMAT}"
+if [ -n "${HIC_RESOLUTION}" ]; then
+    PROCESSED_DIR_NAME="${PROCESSED_DIR_NAME}_hicres_${HIC_RESOLUTION}"
+fi
+# Add interpolate to processed directory name if enabled
+if [ "${INTERPOLATE}" = "true" ]; then
+    PROCESSED_DIR_NAME="${PROCESSED_DIR_NAME}_interpolate_5x"
+fi
 
 for TEST_CELL in "${TEST_CELLTYPES[@]}"; do
-    echo "Calculating metrics for ${TEST_CELL}..."
+    echo "Visualizing ${TEST_CELL}..."
     OUTPUT_DIR="${RESULTS_DIR}"
     if [ "${TEST_CELL}" = "${TRAIN_CELLTYPE}" ]; then
         OUTPUT_DIR="${RESULTS_DIR}/${TEST_CELL}"
@@ -441,34 +521,77 @@ for TEST_CELL in "${TEST_CELLTYPES[@]}"; do
 
     # Check if prediction directory exists
     if [ ! -d "${OUTPUT_DIR}/predictions" ]; then
-        echo "Warning: No predictions found for ${TEST_CELL}, skipping metrics calculation"
+        echo "Warning: No predictions found for ${TEST_CELL}, skipping visualization"
         continue
     fi
     
-    # Find target file based on target type and specified format
-    TARGET_FILE=""
-    target_file=$(find "${DATA_DIR}/${TEST_CELL}/${TARGET_TYPE}" -name "*.${TARGET_FORMAT}" -type f | head -n 1)
+    RAW_DATA_PATH="${PROCESSED_DATA_DIR}/${TEST_CELL}/${TARGET_TYPE}/${PROCESSED_DIR_NAME}"
     
-    if [ -z "${target_file}" ]; then
-        echo "Warning: No target file with format .${TARGET_FORMAT} found for ${TEST_CELL}, skipping metrics calculation"
+    # Check if raw data directory exists
+    if [ ! -d "${RAW_DATA_PATH}" ]; then
+        echo "Warning: No processed data found at ${RAW_DATA_PATH}, skipping visualization"
         continue
     fi
-    
-    TARGET_FILE="${target_file}"
-    
-    mkdir -p "${OUTPUT_DIR}/metrics"
-    python ${SRC_DIR}/Metrics/SCC.py \
-        --matrix_directory "${OUTPUT_DIR}/predictions" \
-        --real_hic_filepath "${TARGET_FILE}" \
-        --chromosome chr10 \
-        --output_path "${OUTPUT_DIR}/metrics" \
-        --max_distance ${WINDOW_SIZE} \
-        --resolution ${RESOLUTION} \
-        --norm ${NORMALIZE} \
+
+    python ${SRC_DIR}/Visualization/compareVisualization.py \
+        --raw_root_data "${RAW_DATA_PATH}" \
+        --predict_root_data "${OUTPUT_DIR}" \
+        --compare_chrom "chr10" \
+        --vis_samples ${VIS_SAMPLES} \
         ${LOG1P_FLAG}
 done
 
-echo "Metrics calculation completed: $(date '+%Y-%m-%d %H:%M:%S')" >> ${PARAM_FILE}
+echo "Visualization completed: $(date '+%Y-%m-%d %H:%M:%S')" >> ${PARAM_FILE}
+
+# Step 4: Metrics Calculation
+# Skip metrics calculation if interpolation is enabled to avoid errors
+if [ "${INTERPOLATE}" = "true" ]; then
+    echo "Skipping metrics calculation when interpolate is enabled to avoid errors" | tee -a ${PARAM_FILE}
+else
+    echo "Starting metrics calculation..."
+    echo "" >> ${PARAM_FILE}
+    echo "Metrics calculation started: $(date '+%Y-%m-%d %H:%M:%S')" >> ${PARAM_FILE}
+
+    for TEST_CELL in "${TEST_CELLTYPES[@]}"; do
+        echo "Calculating metrics for ${TEST_CELL}..."
+        OUTPUT_DIR="${RESULTS_DIR}"
+        if [ "${TEST_CELL}" = "${TRAIN_CELLTYPE}" ]; then
+            OUTPUT_DIR="${RESULTS_DIR}/${TEST_CELL}"
+        else
+            OUTPUT_DIR="${RESULTS_DIR}/${TRAIN_CELLTYPE}to${TEST_CELL}"
+        fi
+
+        # Check if prediction directory exists
+        if [ ! -d "${OUTPUT_DIR}/predictions" ]; then
+            echo "Warning: No predictions found for ${TEST_CELL}, skipping metrics calculation"
+            continue
+        fi
+        
+        # Find target file based on target type and specified format
+        TARGET_FILE=""
+        target_file=$(find "${DATA_DIR}/${TEST_CELL}/${TARGET_TYPE}" -name "*.${TARGET_FORMAT}" -type f | head -n 1)
+        
+        if [ -z "${target_file}" ]; then
+            echo "Warning: No target file with format .${TARGET_FORMAT} found for ${TEST_CELL}, skipping metrics calculation"
+            continue
+        fi
+        
+        TARGET_FILE="${target_file}"
+        
+        mkdir -p "${OUTPUT_DIR}/metrics"
+        python ${SRC_DIR}/Metrics/SCC.py \
+            --matrix_directory "${OUTPUT_DIR}/predictions" \
+            --real_hic_filepath "${TARGET_FILE}" \
+            --chromosome chr10 \
+            --output_path "${OUTPUT_DIR}/metrics" \
+            --max_distance ${WINDOW_SIZE} \
+            --resolution ${RESOLUTION} \
+            --norm ${NORMALIZE} \
+            ${LOG1P_FLAG}
+    done
+
+    echo "Metrics calculation completed: $(date '+%Y-%m-%d %H:%M:%S')" >> ${PARAM_FILE}
+fi
 
 # Add final completion time to parameters file
 echo "" >> ${PARAM_FILE}
