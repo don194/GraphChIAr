@@ -93,7 +93,6 @@ You can train the model and evaluate it on test cell types using the provided sh
   --target-type "CTCF_ChIA-PET" \
   --chipseq "ctcf" \
   --resolution 10000 \
-  --offset 10000 \
   --window_size 2000000 \
   --step_size 500000 \
   --model GraphChIAr --normalize NONE --log1p true \
