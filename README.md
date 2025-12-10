@@ -91,7 +91,7 @@ You can train the model and evaluate it on test cell types using the provided sh
 ./train_and_evaluate.sh --train-celltype GM12878 \
   --test-celltypes "K562 IMR90" \
   --target-type "CTCF_ChIA-PET" \
-  --chipseq "ctcf H3K4me3 H3K27ac" \
+  --chipseq "ctcf" \
   --resolution 10000 \
   --offset 10000 \
   --window_size 2000000 \
