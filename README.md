@@ -66,11 +66,11 @@ conda create -n GraphChIA python=3.9 -y
 conda activate GraphChIA
 
 # Install PyTorch 2.4 with CUDA 12.4 support
-conda install pytorch==2.4.0 torchvision==0.19.0 torchaudio==2.4.0 pytorch-cuda=12.4 -c pytorch -c nvidia
+pip install torch==2.4.0 torchvision==0.19.0 torchaudio==2.4.0 --index-url https://download.pytorch.org/whl/cu124
 
 # Install PyTorch Geometric
-conda install pyg -c pyg
-
+pip install torch_geometric
+pip install pyg_lib torch_scatter torch_sparse torch_cluster torch_spline_conv -f https://data.pyg.org/whl/torch-2.4.0+12.4.html
 # Install PyTorch Lightning
 pip install pytorch-lightning==1.9.0
 
@@ -82,8 +82,6 @@ pip install numpy==1.26.4 pandas matplotlib scikit-learn==1.3.0 scipy==1.13
 ```
 
 ## Usage
-
-### 1. Training and Evaluation
 
 You can train the model and evaluate it on test cell types using the provided shell script:
 
@@ -104,28 +102,7 @@ You can train the model and evaluate it on test cell types using the provided sh
   --target-format hic
 ```
 
-### 2. Prediction with Pre-trained Model
 
-To make predictions on specific genomic regions using a trained checkpoint:
-
-```
-python -m gchia.Predict.predict \
-  --checkpoint-path /path/to/checkpoint.ckpt \
-  --output-dir /path/to/output/directory \
-  --model GraphChIAr \
-  --data-root /path/to/ProcessedData \
-  --celltype GM12878 \
-  --hic-file /path/to/GM12878.hic \
-  --chipseq-files ctcf \
-  --chr-sizes-file ReferenceGenome/hg38/hg38.chrom.sizes \
-  --hic_resolution 5000 \
-  --resolution 10000 \
-  --offset 10000 \
-  --step_size 500000 \
-  --window_size 2000000 \
-  --chrom chr1 --start 0 --end 10000000 \
-  --log1p true
-```
 
 ## Parameters
 
