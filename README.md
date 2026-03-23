@@ -178,7 +178,9 @@ results/[experiment_name]/
 
 If you use GraphChIAr in your research, please cite:
 ```
-
+Dong Hao, Rao Guo-Zheng, Wang Hao-Yu, Wu Xin-Ran, Xian Tong, Wang Bo-Qiang, Du Pu-Feng.
+GraphChIAr: Genome-wide super-resolution reconstruction of protein-mediated remote chromatin interactions by augmenting Hi-C interaction maps with multiple ChIP-seq profiles[J].
+(submitted).
 ```
 
 
