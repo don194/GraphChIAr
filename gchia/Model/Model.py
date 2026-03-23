@@ -116,81 +116,25 @@ class GraphChIAr(nn.Module):
         
         return adj_matrices.unsqueeze(1)  # [batch_size, 1, seq_len, seq_len]
     def batch_difformer_forward_for_sequences(self, difformer_model, x, batch_size, seq_len, edge_index=None, edge_weights=None):
-        """
-        Batch-safe DIFFormer processing for sequence data
-        
-        Important Note:
-        Standard PyTorch Geometric batch processing concatenates all nodes from different samples 
-        into a single large graph, which may cause information leakage between different samples.
-        
-        To ensure prediction accuracy and independence between samples, this function processes 
-        each sample independently:
-        1. Reorganize batch data into independent samples
-        2. Filter edge indices to ensure each sample only uses internal connections
-        3. Convert global edge indices to local indices
-        4. Apply DIFFormer to each sample separately
-        5. Recombine processed results
-        
-        Args:
-            difformer_model: DIFFormer model instance
-            x: Node features [batch_size * seq_len, features]
-            batch_size: Number of samples in batch
-            seq_len: Sequence length
-            edge_index: Edge indices [2, num_edges]
-            edge_weights: Edge weights [num_edges]
-            
-        Returns:
-            Processed node features [batch_size * seq_len, output_features]
-        """
-        # Reorganize data to [batch_size, seq_len, features]
+        if batch_size == 0:
+            return torch.tensor([], device=x.device)
+
         x_batched = x.view(batch_size, seq_len, -1)
-        
-        outputs = []
-        
-        # Process each sample independently to ensure no cross-sample information transfer
-        for i in range(batch_size):
-            current_seq = x_batched[i]  # [seq_len, features]
-            
-            # Process edges for current sequence (if any)
-            current_edge_index = None
-            current_edge_weights = None
-            
-            if edge_index is not None:
-                start_idx = i * seq_len
-                end_idx = (i + 1) * seq_len
-                
-                # Only keep edges within current sequence, filter out cross-sample connections
-                edge_mask = (edge_index[0] >= start_idx) & (edge_index[0] < end_idx) & \
-                           (edge_index[1] >= start_idx) & (edge_index[1] < end_idx)
-                
-                if edge_mask.sum() > 0:
-                    # Convert to local indices (0 to seq_len-1)
-                    current_edge_index = edge_index[:, edge_mask] - start_idx
-                    
-                    if edge_weights is not None:
-                        current_edge_weights = edge_weights[edge_mask]
-                else:
-                    # If no edges for this sample, create empty edge_index
-                    current_edge_index = torch.empty((2, 0), dtype=torch.long, device=x.device)
-                    current_edge_weights = torch.empty(0, dtype=torch.float, device=x.device) if edge_weights is not None else None
-            else:
-                # If no edges at all, create empty edge_index for this sample
-                current_edge_index = torch.empty((2, 0), dtype=torch.long, device=x.device)
-                current_edge_weights = torch.empty(0, dtype=torch.float, device=x.device) if edge_weights is not None else None
-            
-            # Process current sequence (completely independent, no cross-sample information transfer)
-            seq_output = difformer_model(current_seq, current_edge_index, current_edge_weights)
-            outputs.append(seq_output)
-        
-        # Recombine to original batch format
-        final_output = torch.cat(outputs, dim=0)  # [batch_size * seq_len, output_features]
-        
-        return final_output
+
+        # DIFFormer now supports [B, L, C] input directly.
+        output = difformer_model(x_batched, edge_index, edge_weights)
+
+        return output.view(-1, output.shape[-1])
 
     def forward(self, data):
         x, seq, edge_index, edge_attr, batch = data.features, data.seq, data.edge_index, data.edge_attr, data.batch
         
         # Original feature processing pipeline
+        if seq.dtype in [torch.int8, torch.uint8, torch.long, torch.int]:
+            seq = seq.long()
+            if seq.dim() == 3 and seq.size(1) == 1:
+                seq = seq.squeeze(1)
+            seq = F.one_hot(seq, num_classes=5).float().permute(0, 2, 1)
         
         x = torch.cat([x, seq], dim=1)
         
@@ -317,54 +261,25 @@ class GraphChIArOffset(nn.Module):
         return nn.Sequential(*blocks)
 
     def batch_difformer_forward_for_sequences(self, difformer_model, x, batch_size, seq_len, edge_index=None, edge_weights=None):
-        # Reorganize data to [batch_size, seq_len, features]
+        if batch_size == 0:
+            return torch.tensor([], device=x.device)
+
         x_batched = x.view(batch_size, seq_len, -1)
-        
-        outputs = []
-        
-        # Process each sample independently to ensure no cross-sample information transfer
-        for i in range(batch_size):
-            current_seq = x_batched[i]  # [seq_len, features]
-            
-            # Process edges for current sequence (if any)
-            current_edge_index = None
-            current_edge_weights = None
-            
-            if edge_index is not None:
-                start_idx = i * seq_len
-                end_idx = (i + 1) * seq_len
-                
-                # Only keep edges within current sequence, filter out cross-sample connections
-                edge_mask = (edge_index[0] >= start_idx) & (edge_index[0] < end_idx) & \
-                           (edge_index[1] >= start_idx) & (edge_index[1] < end_idx)
-                
-                if edge_mask.sum() > 0:
-                    # Convert to local indices (0 to seq_len-1)
-                    current_edge_index = edge_index[:, edge_mask] - start_idx
-                    
-                    if edge_weights is not None:
-                        current_edge_weights = edge_weights[edge_mask]
-                else:
-                    # If no edges for this sample, create empty edge_index
-                    current_edge_index = torch.empty((2, 0), dtype=torch.long, device=x.device)
-                    current_edge_weights = torch.empty(0, dtype=torch.float, device=x.device) if edge_weights is not None else None
-            else:
-                # If no edges at all, create empty edge_index for this sample
-                current_edge_index = torch.empty((2, 0), dtype=torch.long, device=x.device)
-                current_edge_weights = torch.empty(0, dtype=torch.float, device=x.device) if edge_weights is not None else None
-            
-            # Process current sequence (completely independent, no cross-sample information transfer)
-            seq_output = difformer_model(current_seq, current_edge_index, current_edge_weights)
-            outputs.append(seq_output)
-        
-        # Recombine to original batch format
-        final_output = torch.cat(outputs, dim=0)  # [batch_size * seq_len, output_features]
-        
-        return final_output
+
+        output = difformer_model(x_batched, edge_index, edge_weights)
+
+        return output.view(-1, output.shape[-1])
 
     def forward(self, data):
         features, seq, edge_index, edge_attr, batch = data.features, data.seq, data.edge_index, data.edge_attr, data.batch
         # logging.info(f"Input features shape: {features.shape}, seq shape: {seq.shape}")
+
+        if seq.dtype in [torch.int8, torch.uint8, torch.long, torch.int]:
+            seq = seq.long()
+            if seq.dim() == 3 and seq.size(1) == 1:
+                seq = seq.squeeze(1)
+            seq = F.one_hot(seq, num_classes=5).float().permute(0, 2, 1)
+
         batch_size = features.size(0)
         initial_x = torch.cat([features, seq], dim=1)
         x_A, x_B = torch.split(initial_x, self.window_size, dim=2)
@@ -523,6 +438,15 @@ class GraphChIArNoSeq(nn.Module):
         )
         
         return adj_matrices.unsqueeze(1)  # [batch_size, 1, seq_len, seq_len]
+
+    def batch_difformer_forward_for_sequences(self, difformer_model, x, batch_size, seq_len, edge_index=None, edge_weights=None):
+        if batch_size == 0:
+            return torch.tensor([], device=x.device)
+
+        x_batched = x.view(batch_size, seq_len, -1)
+        output = difformer_model(x_batched, edge_index, edge_weights)
+
+        return output.view(-1, output.shape[-1])
     
     def forward(self, data):
         x, seq, edge_index, edge_attr, batch = data.features, data.seq, data.edge_index, data.edge_attr, data.batch
@@ -538,7 +462,9 @@ class GraphChIArNoSeq(nn.Module):
         x = x.reshape(-1, x.size(2))
         
         edge_weights = edge_attr.float() if edge_attr is not None else torch.ones(edge_index.size(1), device=edge_index.device)
-        x = self.difformer(x, edge_index, edge_weights)
+        x = self.batch_difformer_forward_for_sequences(
+            self.difformer, x, len(torch.unique(batch)), self.matrix_size, edge_index, edge_weights
+        )
         
         graph_nums = len(torch.unique(batch))
         batch_size = x.size(0)
@@ -749,81 +675,24 @@ class GraphChIAr_super(nn.Module):
         
         return adj_matrices.unsqueeze(1)  # [batch_size, 1, seq_len, seq_len]
     def batch_difformer_forward_for_sequences(self, difformer_model, x, batch_size, seq_len, edge_index=None, edge_weights=None):
-        """
-        Batch-safe DIFFormer processing for sequence data
-        
-        Important Note:
-        Standard PyTorch Geometric batch processing concatenates all nodes from different samples 
-        into a single large graph, which may cause information leakage between different samples.
-        
-        To ensure prediction accuracy and independence between samples, this function processes 
-        each sample independently:
-        1. Reorganize batch data into independent samples
-        2. Filter edge indices to ensure each sample only uses internal connections
-        3. Convert global edge indices to local indices
-        4. Apply DIFFormer to each sample separately
-        5. Recombine processed results
-        
-        Args:
-            difformer_model: DIFFormer model instance
-            x: Node features [batch_size * seq_len, features]
-            batch_size: Number of samples in batch
-            seq_len: Sequence length
-            edge_index: Edge indices [2, num_edges]
-            edge_weights: Edge weights [num_edges]
-            
-        Returns:
-            Processed node features [batch_size * seq_len, output_features]
-        """
-        # Reorganize data to [batch_size, seq_len, features]
+        if batch_size == 0:
+            return torch.tensor([], device=x.device)
+
         x_batched = x.view(batch_size, seq_len, -1)
-        
-        outputs = []
-        
-        # Process each sample independently to ensure no cross-sample information transfer
-        for i in range(batch_size):
-            current_seq = x_batched[i]  # [seq_len, features]
-            
-            # Process edges for current sequence (if any)
-            current_edge_index = None
-            current_edge_weights = None
-            
-            if edge_index is not None:
-                start_idx = i * seq_len
-                end_idx = (i + 1) * seq_len
-                
-                # Only keep edges within current sequence, filter out cross-sample connections
-                edge_mask = (edge_index[0] >= start_idx) & (edge_index[0] < end_idx) & \
-                           (edge_index[1] >= start_idx) & (edge_index[1] < end_idx)
-                
-                if edge_mask.sum() > 0:
-                    # Convert to local indices (0 to seq_len-1)
-                    current_edge_index = edge_index[:, edge_mask] - start_idx
-                    
-                    if edge_weights is not None:
-                        current_edge_weights = edge_weights[edge_mask]
-                else:
-                    # If no edges for this sample, create empty edge_index
-                    current_edge_index = torch.empty((2, 0), dtype=torch.long, device=x.device)
-                    current_edge_weights = torch.empty(0, dtype=torch.float, device=x.device) if edge_weights is not None else None
-            else:
-                # If no edges at all, create empty edge_index for this sample
-                current_edge_index = torch.empty((2, 0), dtype=torch.long, device=x.device)
-                current_edge_weights = torch.empty(0, dtype=torch.float, device=x.device) if edge_weights is not None else None
-            
-            # Process current sequence (completely independent, no cross-sample information transfer)
-            seq_output = difformer_model(current_seq, current_edge_index, current_edge_weights)
-            outputs.append(seq_output)
-        
-        # Recombine to original batch format
-        final_output = torch.cat(outputs, dim=0)  # [batch_size * seq_len, output_features]
-        
-        return final_output
+
+        output = difformer_model(x_batched, edge_index, edge_weights)
+
+        return output.view(-1, output.shape[-1])
     
     def forward(self, data):
         x, seq, edge_index, edge_attr, batch = data.features, data.seq, data.edge_index, data.edge_attr, data.batch
         
         # Original feature processing pipeline
+        if seq.dtype in [torch.int8, torch.uint8, torch.long, torch.int]:
+            seq = seq.long()
+            if seq.dim() == 3 and seq.size(1) == 1:
+                seq = seq.squeeze(1)
+            seq = F.one_hot(seq, num_classes=5).float().permute(0, 2, 1)
         
         x = torch.cat([x, seq], dim=1)
         # logging.info(f"X shape: {x.shape}")

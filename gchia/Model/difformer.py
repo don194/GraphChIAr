@@ -9,51 +9,92 @@ from torch_geometric.utils import degree
 
 def full_attention_conv(qs, ks, vs, kernel, output_attn=False):
     '''
-    qs: query tensor [N, H, M]
-    ks: key tensor [L, H, M]
-    vs: value tensor [L, H, D]
+    qs: query tensor [B, N, H, M] (Batched) or [N, H, M] (Unbatched)
+    ks: key tensor   [B, L, H, M] (Batched) or [L, H, M] (Unbatched)
+    vs: value tensor [B, L, H, D] (Batched) or [L, H, D] (Unbatched)
 
-    return output [N, H, D]
+    return output [B, N, H, D] or [N, H, D]
     '''
+    
+    # Check if input is batched (4D)
+    is_batched = qs.dim() == 4
+
     if kernel == 'simple':
-        # normalize input
-        qs = qs / torch.norm(qs, p=2) # [N, H, M]
-        ks = ks / torch.norm(ks, p=2) # [L, H, M]
-        N = qs.shape[0]
+        # Normalize input
+        qs = qs / torch.norm(qs, p=2, dim=-1, keepdim=True)
+        ks = ks / torch.norm(ks, p=2, dim=-1, keepdim=True)
 
-        # numerator
-        kvs = torch.einsum("lhm,lhd->hmd", ks, vs)
-        attention_num = torch.einsum("nhm,hmd->nhd", qs, kvs) # [N, H, D]
-        all_ones = torch.ones([vs.shape[0]]).to(vs.device)
-        vs_sum = torch.einsum("l,lhd->hd", all_ones, vs) # [H, D]
-        attention_num += vs_sum.unsqueeze(0).repeat(vs.shape[0], 1, 1) # [N, H, D]
+        if is_batched:
+            # Batched implementation
+            B, N, H, M = qs.shape
 
-        # denominator
-        all_ones = torch.ones([ks.shape[0]]).to(ks.device)
-        ks_sum = torch.einsum("lhm,l->hm", ks, all_ones)
-        attention_normalizer = torch.einsum("nhm,hm->nh", qs, ks_sum)  # [N, H]
+            # numerator
+            kvs = torch.einsum("blhm,blhd->bhmd", ks, vs) # [B, H, M, D]
+            attention_num = torch.einsum("bnhm,bhmd->bnhd", qs, kvs) # [B, N, H, D]
 
-        # attentive aggregated results
-        attention_normalizer = torch.unsqueeze(attention_normalizer, len(attention_normalizer.shape))  # [N, H, 1]
-        attention_normalizer += torch.ones_like(attention_normalizer) * N
-        attn_output = attention_num / attention_normalizer # [N, H, D]
+            all_ones = torch.ones([vs.shape[1]]).to(vs.device) # [L]
+            vs_sum = torch.einsum("l,blhd->bhd", all_ones, vs) # [B, H, D]
+            attention_num += vs_sum.unsqueeze(1) # [B, N, H, D]
 
-        # compute attention for visualization if needed
-        if output_attn:
-            attention = torch.einsum("nhm,lhm->nlh", qs, ks) / attention_normalizer # [N, L, H]
+            # denominator
+            all_ones = torch.ones([ks.shape[1]]).to(ks.device) # [L]
+            ks_sum = torch.einsum("blhm,l->bhm", ks, all_ones) # [B, H, M]
+            attention_normalizer = torch.einsum("bnhm,bhm->bnh", qs, ks_sum)  # [B, N, H]
+
+            # attentive aggregated results
+            attention_normalizer = attention_normalizer.unsqueeze(-1)  # [B, N, H, 1]
+            attention_normalizer += torch.ones_like(attention_normalizer) * N
+            attn_output = attention_num / attention_normalizer # [B, N, H, D]
+
+            if output_attn:
+                attention = torch.einsum("bnhm,blhm->bnlh", qs, ks) / attention_normalizer # [B, N, L, H]
+        else:
+            # Original unbatched implementation
+            N = qs.shape[0]
+
+            # numerator
+            kvs = torch.einsum("lhm,lhd->hmd", ks, vs)
+            attention_num = torch.einsum("nhm,hmd->nhd", qs, kvs) # [N, H, D]
+            all_ones = torch.ones([vs.shape[0]]).to(vs.device)
+            vs_sum = torch.einsum("l,lhd->hd", all_ones, vs) # [H, D]
+            attention_num += vs_sum.unsqueeze(0).repeat(vs.shape[0], 1, 1) # [N, H, D]
+
+            # denominator
+            all_ones = torch.ones([ks.shape[0]]).to(ks.device)
+            ks_sum = torch.einsum("lhm,l->hm", ks, all_ones)
+            attention_normalizer = torch.einsum("nhm,hm->nh", qs, ks_sum)  # [N, H]
+
+            # attentive aggregated results
+            attention_normalizer = torch.unsqueeze(attention_normalizer, len(attention_normalizer.shape))  # [N, H, 1]
+            attention_normalizer += torch.ones_like(attention_normalizer) * N
+            attn_output = attention_num / attention_normalizer # [N, H, D]
+
+            if output_attn:
+                attention = torch.einsum("nhm,lhm->nlh", qs, ks) / attention_normalizer # [N, L, H]
 
     elif kernel == 'sigmoid':
-        # numerator
-        attention_num = torch.sigmoid(torch.einsum("nhm,lhm->nlh", qs, ks))  # [N, L, H]
+        if is_batched:
+            # Batched sigmoid implementation
+            attention_num = torch.sigmoid(torch.einsum("bnhm,blhm->bnlh", qs, ks)) # [B, N, L, H]
 
-        # denominator
-        all_ones = torch.ones([ks.shape[0]]).to(ks.device)
-        attention_normalizer = torch.einsum("nlh,l->nh", attention_num, all_ones)
-        attention_normalizer = attention_normalizer.unsqueeze(1).repeat(1, ks.shape[0], 1)  # [N, L, H]
+            all_ones = torch.ones([ks.shape[1]]).to(ks.device)
+            attention_normalizer = torch.einsum("bnlh,l->bnh", attention_num, all_ones)
+            attention_normalizer = attention_normalizer.unsqueeze(2) # [B, N, 1, H]
 
-        # compute attention and attentive aggregated results
-        attention = attention_num / attention_normalizer
-        attn_output = torch.einsum("nlh,lhd->nhd", attention, vs)  # [N, H, D]
+            attention = attention_num / (attention_normalizer + 1e-6)
+            attn_output = torch.einsum("bnlh,blhd->bnhd", attention, vs)
+        else:
+            # Original unbatched implementation
+            attention_num = torch.sigmoid(torch.einsum("nhm,lhm->nlh", qs, ks))  # [N, L, H]
+
+            # denominator
+            all_ones = torch.ones([ks.shape[0]]).to(ks.device)
+            attention_normalizer = torch.einsum("nlh,l->nh", attention_num, all_ones)
+            attention_normalizer = attention_normalizer.unsqueeze(1).repeat(1, ks.shape[0], 1)  # [N, L, H]
+
+            # compute attention and attentive aggregated results
+            attention = attention_num / attention_normalizer
+            attn_output = torch.einsum("nlh,lhd->nhd", attention, vs)  # [N, H, D]
 
     if output_attn:
         return attn_output, attention
@@ -107,26 +148,53 @@ class DIFFormerConv(nn.Module):
             self.Wv.reset_parameters()
 
     def forward(self, query_input, source_input, edge_index=None, edge_weight=None, output_attn=False):
+        # Check for batched input [B, L, D]
+        is_batched = query_input.dim() == 3
+
         # feature transformation
-        query = self.Wq(query_input).reshape(-1, self.num_heads, self.out_channels)
-        key = self.Wk(source_input).reshape(-1, self.num_heads, self.out_channels)
+        query = self.Wq(query_input)
+        key = self.Wk(source_input)
         if self.use_weight:
-            value = self.Wv(source_input).reshape(-1, self.num_heads, self.out_channels)
+            value = self.Wv(source_input)
         else:
-            value = source_input.reshape(-1, 1, self.out_channels)
+            if is_batched:
+                value = source_input.reshape(source_input.shape[0], source_input.shape[1], 1, self.out_channels)
+            else:
+                value = source_input.reshape(-1, 1, self.out_channels)
+
+        if is_batched:
+            B, L, _ = query_input.shape
+            query = query.reshape(B, L, self.num_heads, self.out_channels)
+            key = key.reshape(B, L, self.num_heads, self.out_channels)
+            if self.use_weight:
+                value = value.reshape(B, L, self.num_heads, self.out_channels)
+        else:
+            query = query.reshape(-1, self.num_heads, self.out_channels)
+            key = key.reshape(-1, self.num_heads, self.out_channels)
+            if self.use_weight:
+                value = value.reshape(-1, self.num_heads, self.out_channels)
 
         # compute full attentive aggregation
         if output_attn:
-            attention_output, attn = full_attention_conv(query, key, value, self.kernel, output_attn)  # [N, H, D]
+            attention_output, attn = full_attention_conv(query, key, value, self.kernel, output_attn)
         else:
-            attention_output = full_attention_conv(query,key,value,self.kernel) # [N, H, D]
+            attention_output = full_attention_conv(query,key,value,self.kernel)
 
         # use input graph for gcn conv
         if self.use_graph:
-            final_output = attention_output + gcn_conv(value, edge_index, edge_weight)
+            # GCN expects [N, H, D], so flatten batched input then reshape back.
+            if is_batched:
+                value_flat = value.reshape(-1, self.num_heads, self.out_channels)
+                gcn_out = gcn_conv(value_flat, edge_index, edge_weight)
+                gcn_out = gcn_out.reshape(B, L, self.num_heads, self.out_channels)
+                final_output = attention_output + gcn_out
+            else:
+                final_output = attention_output + gcn_conv(value, edge_index, edge_weight)
         else:
             final_output = attention_output
-        final_output = final_output.mean(dim=1)
+
+        # Mean over head dimension (works for batched and unbatched)
+        final_output = final_output.mean(dim=-2)
 
         if output_attn:
             return final_output, attn
